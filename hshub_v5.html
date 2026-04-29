@@ -2874,8 +2874,10 @@ document.getElementById('sbtn').addEventListener('click',function(e){
   let tx=gx,ty=gy;
   document.addEventListener('mousemove',e=>{tx=e.clientX;ty=e.clientY});
   document.addEventListener('mouseenter',e=>{
-    if(e.target.matches('button,.rcard,.sbtn,.lbtn-main,.lbtn-discord,.lnav-link,.sh'))glow.classList.add('big');
-    else glow.classList.remove('big');
+    if(e.target&&typeof e.target.matches==='function'){
+      if(e.target.matches('button,.rcard,.sbtn,.lbtn-main,.lbtn-discord,.lnav-link,.sh'))glow.classList.add('big');
+      else glow.classList.remove('big');
+    }
   },true);
   function animGlow(){gx+=(tx-gx)*0.12;gy+=(ty-gy)*0.12;glow.style.left=gx+'px';glow.style.top=gy+'px';requestAnimationFrame(animGlow)}
   animGlow();

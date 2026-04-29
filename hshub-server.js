@@ -59,7 +59,7 @@ async function loadBinFile(filePath) {
   if (size > 32 * 1024 * 1024 * 1024)
     console.warn(`    ⚠  Fichier > 32GB — assurez-vous d'avoir assez de RAM`);
 
-  const buf = fs.readFileSync(filePath);
+  const buf = await fs.promises.readFile(filePath);
   let pos = 0;
 
   const readU8    = ()     => buf[pos++];
