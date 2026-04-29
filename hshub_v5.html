@@ -1408,19 +1408,25 @@ let _srvReady;
 const _srvPromise = new Promise(r => { _srvReady = r; });
 
 (async function detectServer() {
-  try {
-    const ac = new AbortController();
-    const t  = setTimeout(() => ac.abort(), 1800);
-    const r  = await fetch('/api/status', { signal: ac.signal });
-    clearTimeout(t);
-    if (r.ok) {
-      const s = await r.json();
-      if (s && typeof s.totalActive === 'number') {
-        SERVER.active = true;
-        SERVER.status = s;
+  // Essaie jusqu'à 3 fois avec délai croissant — le serveur peut démarrer lentement
+  for (var attempt = 0; attempt < 3; attempt++) {
+    try {
+      const ac = new AbortController();
+      const t  = setTimeout(() => ac.abort(), 4000);
+      const r  = await fetch('/api/status', { signal: ac.signal });
+      clearTimeout(t);
+      if (r.ok) {
+        const s = await r.json();
+        if (s && typeof s.totalActive === 'number') {
+          SERVER.active = true;
+          SERVER.status = s;
+          break;
+        }
       }
+    } catch(_) {
+      if (attempt < 2) await new Promise(r => setTimeout(r, 800));
     }
-  } catch(_) {}
+  }
   _srvReady();
 })();
 
