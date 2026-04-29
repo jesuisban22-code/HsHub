@@ -1531,29 +1531,11 @@ const _srvPromise = new Promise(r => { _srvReady = r; });
         return;
       }
 
-      // ── LOCAL MODE ───────────────────────────────────────────────
+      // ── PAS DE SERVEUR — afficher la landing, rien à charger ────
       try { updateSrvBadge(); } catch(e) {}
-
-      // 1. Cache IndexedDB
-      var cached = [];
-      try { cached = await IDB.getAll(); } catch(e) {}
-
-      if (cached.length > 0) {
-        setOv(true, '⚡ Restauration du cache…', '', '5%', 5);
-        UI._pendingCacheBins      = cached.length;
-        UI._pendingCacheBinsTotal = cached.length;
-        for (var i = 0; i < cached.length; i++) {
-          if(lcnt) lcnt.textContent = 'Chargement ' + (i+1) + '/' + cached.length + ' : ' + cached[i].name;
-          worker.postMessage({type:'loadBin', buffer: cached[i].buffer}, [cached[i].buffer]);
-        }
-        try { updateCacheBadge(); } catch(e) {}
-        return;
-      }
-
-      // 2. Pas de cache et pas de serveur — afficher la landing, ne pas télécharger index.bin
       setOv(false);
       setTimeout(function() {
-        try { toast('Lancez le serveur ou glissez vos fichiers .bin / CSV', ''); } catch(e) {}
+        try { toast('Lancez le serveur pour effectuer des recherches', ''); } catch(e) {}
       }, 600);
 
     })(); // end async IIFE
