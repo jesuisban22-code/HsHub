@@ -36,6 +36,9 @@ const F = { dbi:0, ln:1, fn:2, bd:3, st:4, sn:5, pc:6, cy:7, co:8, ni:9, em:10, 
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const Nn   = s => !s ? '' : String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+/g,' ').trim();
+// Version rapide pour le scan — evite normalize('NFD') sur chaque ligne
+const _AC  = {'à':'a','á':'a','â':'a','ä':'a','ã':'a','å':'a','æ':'ae','è':'e','é':'e','ê':'e','ë':'e','ì':'i','í':'i','î':'i','ï':'i','ò':'o','ó':'o','ô':'o','ö':'o','õ':'o','ø':'o','ù':'u','ú':'u','û':'u','ü':'u','ý':'y','ÿ':'y','ñ':'n','ç':'c','ß':'ss','œ':'oe'};
+const NnF  = s => !s ? '' : s.toLowerCase().replace(/[àáâäãåæèéêëìíîïòóôöõøùúûüýÿñçßœ]/g, c => _AC[c]||c).replace(/\s+/g,' ').trim();
 const ND   = s => !s ? '' : String(s).replace(/[-\/.]/g,'');
 const fmtB = n => n >= 1e9 ? (n/1e9).toFixed(1)+'GB' : n >= 1e6 ? (n/1e6).toFixed(0)+'MB' : (n/1e3).toFixed(0)+'KB';
 const fmtN = n => n >= 1e9 ? (n/1e9).toFixed(2)+'B'  : n >= 1e6 ? (n/1e6).toFixed(1)+'M'  : n >= 1e3 ? (n/1e3).toFixed(0)+'K' : String(n);
@@ -142,26 +145,27 @@ function mt(raw, term) {
 }
 
 async function scanSearch(q) {
-  const qLN  = q.qLN    ? Nn(q.qLN)                               : null;
-  const qFN  = q.qFN    ? Nn(q.qFN)                               : null;
-  const qBF  = q.qBF    ? ND(q.qBF)                               : null;
-  const qYear  = !qBF && q.qYear  ? q.qYear.slice(0, 4)           : null;
-  const qMonth = !qBF && q.qMonth ? q.qMonth                      : null;
-  const qDay   = !qBF && q.qDay   ? q.qDay                        : null;
-  const qST  = q.qStreet  ? Nn(q.qStreet)                         : null;
-  const qPC  = q.qPostal  ? q.qPostal.trim()                      : null;
-  const qCY  = q.qCity    ? Nn(q.qCity)                           : null;
-  const qCO  = q.qCountry ? Nn(q.qCountry)                        : null;
-  const qNI  = q.qNID     ? q.qNID.replace(/[\s\-.]/g, '')        : null;
-  const qEM  = q.qEmail   ? Nn(q.qEmail)                          : null;
-  const qPH  = q.qPhone   ? q.qPhone.replace(/\D/g, '')           : null;
-  const qIB  = q.qIban    ? q.qIban.replace(/\s/g,'').toLowerCase(): null;
-  const qIP  = q.qIp      ? q.qIp.trim()                          : null;
+  // NnF pour la normalisation des termes de recherche (compatible avec les données du buffer)
+  const qLN  = q.qLN    ? NnF(q.qLN)                               : null;
+  const qFN  = q.qFN    ? NnF(q.qFN)                               : null;
+  const qBF  = q.qBF    ? ND(q.qBF)                                : null;
+  const qYear  = !qBF && q.qYear  ? q.qYear.slice(0, 4)            : null;
+  const qMonth = !qBF && q.qMonth ? q.qMonth                       : null;
+  const qDay   = !qBF && q.qDay   ? q.qDay                         : null;
+  const qST  = q.qStreet  ? NnF(q.qStreet)                         : null;
+  const qPC  = q.qPostal  ? q.qPostal.trim()                       : null;
+  const qCY  = q.qCity    ? NnF(q.qCity)                           : null;
+  const qCO  = q.qCountry ? NnF(q.qCountry)                        : null;
+  const qNI  = q.qNID     ? q.qNID.replace(/[\s\-.]/g, '')         : null;
+  const qEM  = q.qEmail   ? NnF(q.qEmail)                          : null;
+  const qPH  = q.qPhone   ? q.qPhone.replace(/\D/g, '')            : null;
+  const qIB  = q.qIban    ? q.qIban.replace(/\s/g,'').toLowerCase() : null;
+  const qIP  = q.qIp      ? q.qIp.trim()                           : null;
 
   const allIds = [];
   const seen   = new Set();
   const total  = W.binRowCount + W.prev.length;
-  const YIELD  = 50_000;
+  const YIELD  = 5_000; // yield fréquent → event loop réactif pendant le scan
 
   for (let id = 0; id < total; id++) {
     if (id > 0 && id % YIELD === 0) await tick();
@@ -175,34 +179,34 @@ async function scanSearch(q) {
       const sF = () => { bp += 2 + b.readUInt16LE(bp); };
 
       const rawLN = nF();
-      if (qLN && !mt(Nn(rawLN), qLN)) continue;
+      if (qLN && !mt(NnF(rawLN), qLN)) continue;
       const rawFN = nF();
-      if (qFN && !mt(Nn(rawFN), qFN)) continue;
+      if (qFN && !mt(NnF(rawFN), qFN)) continue;
       const rawBD = nF();
       if (qBF  && !mt(ND(rawBD), qBF)) continue;
       if (qYear  && !rawBD.includes(qYear))  continue;
       if (qMonth && !rawBD.includes(qMonth)) continue;
       if (qDay   && !rawBD.includes(qDay))   continue;
       const rawST = qST ? nF() : (sF(), '');
-      if (qST && !mt(Nn(rawST), qST)) continue;
+      if (qST && !mt(NnF(rawST), qST)) continue;
       sF(); // sn — jamais filtré
       const rawPC = nF();
       if (qPC && !mt(rawPC, qPC)) continue;
       const rawCY = qCY ? nF() : (sF(), '');
-      if (qCY && !mt(Nn(rawCY), qCY)) continue;
+      if (qCY && !mt(NnF(rawCY), qCY)) continue;
       const rawCO = qCO ? nF() : (sF(), '');
-      if (qCO && !mt(Nn(rawCO), qCO)) continue;
+      if (qCO && !mt(NnF(rawCO), qCO)) continue;
       const rawNI = qNI ? nF() : (sF(), '');
       if (qNI && !mt(rawNI.replace(/[\s\-.]/g,''), qNI)) continue;
       const rawEM = qEM ? nF() : (sF(), '');
-      if (qEM && !mt(Nn(rawEM), qEM)) continue;
+      if (qEM && !mt(NnF(rawEM), qEM)) continue;
       const rawPH = qPH ? nF() : (sF(), '');
       if (qPH && !mt(rawPH.replace(/\D/g,''), qPH)) continue;
       const rawIB = qIB ? nF() : (sF(), '');
       if (qIB && !mt(rawIB.replace(/\s/g,'').toLowerCase(), qIB)) continue;
       if (qIP) { const rawIP = nF(); if (!mt(rawIP.trim(), qIP)) continue; }
 
-      const key = Nn(rawLN)+'|'+Nn(rawFN)+'|'+ND(rawBD)+'|'+rawPC;
+      const key = NnF(rawLN)+'|'+NnF(rawFN)+'|'+ND(rawBD)+'|'+rawPC;
       if (seen.has(key)) continue;
       seen.add(key); allIds.push(id);
 
@@ -360,7 +364,7 @@ app.get('/api/fam/:id', async (req, res) => {
   const ln = Nn(p[F.ln]), pc = p[F.pc], st = Nn(p[F.st]);
   const sc    = new Map();
   const total = W.binRowCount + W.prev.length;
-  const YIELD = 50_000;
+  const YIELD = 5_000;
   for (let rid = 0; rid < total; rid++) {
     if (rid > 0 && rid % YIELD === 0) await tick();
     if (rid === id || W.deleted.has(rid)) continue;
