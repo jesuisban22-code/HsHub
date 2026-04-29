@@ -2055,8 +2055,6 @@ function v(id){return(document.getElementById(id)||{}).value?.trim()||''}
 // SEARCH
 // ================================================================
 function doSearch() {
-  if(!UI.totalActive && !SERVER.active){toast('⚠ Chargez une base d\'abord !');return}
-  if(!UI.totalActive && SERVER.active){toast('⚠ Le serveur n\'a pas encore fini de charger…');return}
   const query={
     qLN:v('q-lastName'),qFN:v('q-firstName'),qNID:v('q-nationalId'),
     qBF:v('q-birthFull'),qDay:v('q-day'),qMonth:v('q-month'),qYear:v('q-year'),
@@ -2066,8 +2064,10 @@ function doSearch() {
   if(Object.values(query).every(x=>!x)){toast('Remplissez au moins un champ.');return}
   document.getElementById('sbtn').classList.add('searching');
   SFX.play('search');
-  if(SERVER.active){ serverSearch(query,Date.now()); }
-  else { worker.postMessage({type:'search',query,ts:Date.now()}); }
+  // Si des données locales sont chargées (drag-drop) ET pas de serveur confirmé → mode local
+  if(UI.totalActive && !SERVER.active){ worker.postMessage({type:'search',query,ts:Date.now()}); return; }
+  // Sinon : toujours l'API serveur (même si SERVER.active pas encore confirmé)
+  serverSearch(query, Date.now());
 }
 
 // ================================================================
