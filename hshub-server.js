@@ -185,6 +185,11 @@ function rowDetail(id) {
 // ── Express ───────────────────────────────────────────────────────────────────
 const app = express();
 app.use(express.json({ limit: '10mb' }));
+// Bloquer l'accès direct aux fichiers de données — le navigateur ne doit jamais les télécharger
+app.use((req, res, next) => {
+  if (/\.(bin|csv)$/i.test(req.path)) return res.status(403).end();
+  next();
+});
 app.use(express.static(DIR));
 app.get('/', (req, res) => res.sendFile(path.join(DIR, 'hshub_v5.html')));
 
