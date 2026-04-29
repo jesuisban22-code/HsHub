@@ -1,0 +1,4 @@
+node_modules/
+*.csv
+index.bin
+desktop.ini
