@@ -41,19 +41,23 @@ const ND   = s => !s ? '' : String(s).replace(/[-\/.]/g,'');
 const fmtB = n => n >= 1e9 ? (n/1e9).toFixed(1)+'GB' : n >= 1e6 ? (n/1e6).toFixed(0)+'MB' : (n/1e3).toFixed(0)+'KB';
 const fmtN = n => n >= 1e9 ? (n/1e9).toFixed(2)+'B'  : n >= 1e6 ? (n/1e6).toFixed(1)+'M'  : n >= 1e3 ? (n/1e3).toFixed(0)+'K' : String(n);
 
-function buildKeys() {
-  for (const [name, map] of Object.entries(W.idx))
+const tick = () => new Promise(r => setImmediate(r));
+
+async function buildKeys() {
+  for (const [name, map] of Object.entries(W.idx)) {
     W.keys[name] = Array.from(map.keys()).sort();
+    await tick(); // libère l'event loop entre chaque champ
+  }
 }
 
-// ── Binary loader (supporte plusieurs fichiers, fusion des index) ─────────────
-function loadBinFile(filePath) {
+// ── Binary loader async (yield régulier pour ne pas bloquer l'event loop) ────
+async function loadBinFile(filePath) {
   const label  = path.basename(filePath);
   const size   = fs.statSync(filePath).size;
   console.log(`\n[•] ${label} (${fmtB(size)})`);
 
   if (size > 32 * 1024 * 1024 * 1024)
-    console.warn(`    ⚠  Fichier > 32GB — assurez-vous d'avoir assez de RAM (node --max-old-space-size=...)`);
+    console.warn(`    ⚠  Fichier > 32GB — assurez-vous d'avoir assez de RAM`);
 
   const buf = fs.readFileSync(filePath);
   let pos = 0;
@@ -84,24 +88,25 @@ function loadBinFile(filePath) {
     W.dbs.push({ id: `preloaded_${dbiBase+i}`, name, count });
   }
 
-  // — Rows —
-  const t0      = Date.now();
-  const BATCH   = 500_000;
+  // — Rows — yield tous les 100k pour laisser passer les requêtes HTTP
+  const t0    = Date.now();
+  const YIELD = 100_000;
   for (let i = 0; i < nb_rows; i++) {
-    const dbi = readU16() + dbiBase;  // décalage dbi pour fusion multi-fichiers
+    const dbi = readU16() + dbiBase;
     const ln  = readStr16(), fn = readStr16(), bd = readStr16();
     const st  = readStr16(), sn = readStr16(), pc = readStr16(), cy = readStr16(), co = readStr16();
     const ni  = readStr16(), em = readStr16(), ph = readStr16(), ib = readStr16(), ip = readStr16();
     W.prev.push([dbi, ln, fn, bd, st, sn, pc, cy, co, ni, em, ph, ib, ip]);
     W.totalActive++;
-    if ((i+1) % BATCH === 0) {
+    if ((i+1) % YIELD === 0) {
       const spd = Math.round((i+1) / ((Date.now()-t0) / 1000));
       process.stdout.write(`\r    Lignes: ${(i+1).toLocaleString()}/${nb_rows.toLocaleString()} — ${(spd/1000).toFixed(0)}k/s   `);
+      await tick(); // yield → les requêtes /api/status peuvent passer ici
     }
   }
   process.stdout.write('\n');
 
-  // — Index (utilise l'index pré-calculé, décale les IDs de rowBase) —
+  // — Index — yield entre chaque champ indexé
   for (let i = 0; i < nb_idx; i++) {
     const name    = readStr8();
     const nb_keys = readU32();
@@ -114,6 +119,7 @@ function loadBinFile(filePath) {
       const arr = m.get(key);
       for (let j = 0; j < nb_ids; j++) arr.push(readU32() + rowBase);
     }
+    await tick(); // yield entre chaque champ
   }
 
   const elapsed = ((Date.now()-t0)/1000).toFixed(1);
@@ -461,8 +467,8 @@ async function main() {
   if (binFiles.length) {
     W.loading = true;
     try {
-      for (const f of binFiles) loadBinFile(f);
-      buildKeys();
+      for (const f of binFiles) await loadBinFile(f);
+      await buildKeys();
       W.loaded = true;
     } catch(e) {
       W.loadError = e.message;
@@ -482,7 +488,7 @@ async function main() {
       W.loading = true;
       try {
         for (const f of csvFiles) await loadCsvFile(f);
-        buildKeys();
+        await buildKeys();
         W.loaded = true;
       } catch(e) {
         W.loadError = e.message;
@@ -492,6 +498,7 @@ async function main() {
     } else {
       console.log('\n[!] Aucun fichier .bin ou .csv trouvé dans', DIR);
       console.log('    Créez un index : node hshub-index.js *.csv -o index.bin\n');
+      W.loadError = 'Aucun fichier .bin ou .csv trouvé dans le dossier du serveur';
     }
   }
 
