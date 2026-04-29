@@ -629,7 +629,7 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
         </div>
       </div>
       <div class="landing-title">Hs<em>Hub</em></div>
-      <div class="landing-subtitle">Moteur de recherche avancé — chargez index.bin pour un démarrage instantané, ou glissez-déposez vos fichiers directement.</div>
+      <div class="landing-subtitle">Moteur de recherche avancé — lancez le serveur puis effectuez vos recherches via l'API.</div>
     </div>
     <div class="landing-stats">
       <div class="lstat"><div class="lstat-val" id="lstat-total">0</div><div class="lstat-lbl">Entrées</div></div>
@@ -1431,7 +1431,7 @@ const _srvPromise = new Promise(r => { _srvReady = r; });
 })();
 
 // ================================================================
-// AUTO-LOAD index.bin IF PRESENT
+// INIT — détection serveur puis affichage landing
 // ================================================================
 (function autoLoadBin(){
   document.addEventListener('DOMContentLoaded', function() {
