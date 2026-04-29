@@ -25,14 +25,6 @@ const W = {
   binRowCount: 0,     // nombre de lignes issues de .bin
   // Rows chargés depuis CSV — tableau JS classique (fallback)
   prev: [],
-  idx: {
-    lastName:  new Map(), firstName: new Map(),
-    birthFull: new Map(), birthYear: new Map(), birthMonth: new Map(), birthDay: new Map(),
-    email:     new Map(), phone:     new Map(), iban:      new Map(), ip:       new Map(),
-    postal:    new Map(), city:      new Map(), country:   new Map(),
-    nationalId:new Map(), street:    new Map()
-  },
-  keys:        {},
   deleted:     new Set(),
   totalActive: 0,
   loaded:      false,
@@ -49,13 +41,6 @@ const fmtB = n => n >= 1e9 ? (n/1e9).toFixed(1)+'GB' : n >= 1e6 ? (n/1e6).toFixe
 const fmtN = n => n >= 1e9 ? (n/1e9).toFixed(2)+'B'  : n >= 1e6 ? (n/1e6).toFixed(1)+'M'  : n >= 1e3 ? (n/1e3).toFixed(0)+'K' : String(n);
 
 const tick = () => new Promise(r => setImmediate(r));
-
-async function buildKeys() {
-  for (const [name, map] of Object.entries(W.idx)) {
-    W.keys[name] = Array.from(map.keys()).sort();
-    await tick(); // libère l'event loop entre chaque champ
-  }
-}
 
 // ── Binary loader async (yield régulier pour ne pas bloquer l'event loop) ────
 async function loadBinFile(filePath) {
@@ -133,20 +118,15 @@ async function loadBinFile(filePath) {
   W.rowBuf = newBuf; W.rowPos = newPos; W.rowDbi = newDbi;
   W.binRowCount = newCount;
 
-  // — Index — yield entre chaque champ indexé
+  // — Index — ignoré : recherche par scan, pas d'index en RAM
   for (let i = 0; i < nb_idx; i++) {
-    const name    = readStr8();
+    const nl = readU8(); pos += nl;          // sauter nom du champ
     const nb_keys = readU32();
-    if (!W.idx[name]) W.idx[name] = new Map();
-    const m = W.idx[name];
     for (let k = 0; k < nb_keys; k++) {
-      const key    = readStr16();
-      const nb_ids = readU32();
-      if (!m.has(key)) m.set(key, []);
-      const arr = m.get(key);
-      for (let j = 0; j < nb_ids; j++) arr.push(readU32() + rowBase);
+      const kl = buf.readUInt16LE(pos); pos += 2 + kl; // sauter clé
+      const nb_ids = buf.readUInt32LE(pos); pos += 4 + nb_ids * 4; // sauter IDs
     }
-    await tick(); // yield entre chaque champ
+    await tick();
   }
 
   const elapsed = ((Date.now()-t0)/1000).toFixed(1);
@@ -154,35 +134,101 @@ async function loadBinFile(filePath) {
   console.log(`    ✓  Chargé en ${elapsed}s  —  heap: ${mem} MB`);
 }
 
-// ── Search ────────────────────────────────────────────────────────────────────
-function ps(idxN, q) {
-  if (!q) return null;
-  const isWild = q.endsWith('*');
-  const prefix = isWild ? q.slice(0,-1) : q;
-  const keys   = W.keys[idxN] || [];
-  const map    = W.idx[idxN];
-  const res    = new Set();
-  let lo = 0, hi = keys.length-1;
-  while (lo <= hi) { const mid = (lo+hi)>>1; if (keys[mid] < prefix) lo = mid+1; else hi = mid-1; }
-  let i = lo;
-  while (i < keys.length && keys[i].startsWith(prefix)) {
-    const ids = map.get(keys[i]); if (ids) ids.forEach(x => res.add(x)); i++;
-  }
-  return res;
+// ── Search — scan séquentiel, pas d'index en RAM ─────────────────────────────
+function mt(raw, term) {
+  if (!term) return true;
+  if (term.endsWith('*')) return raw.startsWith(term.slice(0, -1));
+  return raw === term;
 }
 
-function intersect(sets) {
-  const active = sets.filter(s => s !== null);
-  if (!active.length) return [];
-  active.sort((a,b) => a.size - b.size);
-  let r = active[0];
-  for (let i = 1; i < active.length; i++) {
-    const n = new Set();
-    for (const x of r) if (active[i].has(x)) n.add(x);
-    r = n;
-    if (!r.size) break;
+async function scanSearch(q) {
+  const qLN  = q.qLN    ? Nn(q.qLN)                               : null;
+  const qFN  = q.qFN    ? Nn(q.qFN)                               : null;
+  const qBF  = q.qBF    ? ND(q.qBF)                               : null;
+  const qYear  = !qBF && q.qYear  ? q.qYear.slice(0, 4)           : null;
+  const qMonth = !qBF && q.qMonth ? q.qMonth                      : null;
+  const qDay   = !qBF && q.qDay   ? q.qDay                        : null;
+  const qST  = q.qStreet  ? Nn(q.qStreet)                         : null;
+  const qPC  = q.qPostal  ? q.qPostal.trim()                      : null;
+  const qCY  = q.qCity    ? Nn(q.qCity)                           : null;
+  const qCO  = q.qCountry ? Nn(q.qCountry)                        : null;
+  const qNI  = q.qNID     ? q.qNID.replace(/[\s\-.]/g, '')        : null;
+  const qEM  = q.qEmail   ? Nn(q.qEmail)                          : null;
+  const qPH  = q.qPhone   ? q.qPhone.replace(/\D/g, '')           : null;
+  const qIB  = q.qIban    ? q.qIban.replace(/\s/g,'').toLowerCase(): null;
+  const qIP  = q.qIp      ? q.qIp.trim()                          : null;
+
+  const allIds = [];
+  const seen   = new Set();
+  const total  = W.binRowCount + W.prev.length;
+  const YIELD  = 50_000;
+
+  for (let id = 0; id < total; id++) {
+    if (id > 0 && id % YIELD === 0) await tick();
+    if (W.deleted.has(id)) continue;
+
+    if (id < W.binRowCount) {
+      // Lecture champ par champ — bail dès que ça ne matche pas
+      const b  = W.bufs[W.rowBuf[id]];
+      let   bp = W.rowPos[id];
+      const nF = () => { const l=b.readUInt16LE(bp); bp+=2; const s=b.toString('utf8',bp,bp+l); bp+=l; return s; };
+      const sF = () => { bp += 2 + b.readUInt16LE(bp); };
+
+      const rawLN = nF();
+      if (qLN && !mt(Nn(rawLN), qLN)) continue;
+      const rawFN = nF();
+      if (qFN && !mt(Nn(rawFN), qFN)) continue;
+      const rawBD = nF();
+      if (qBF  && !mt(ND(rawBD), qBF)) continue;
+      if (qYear  && !rawBD.includes(qYear))  continue;
+      if (qMonth && !rawBD.includes(qMonth)) continue;
+      if (qDay   && !rawBD.includes(qDay))   continue;
+      const rawST = qST ? nF() : (sF(), '');
+      if (qST && !mt(Nn(rawST), qST)) continue;
+      sF(); // sn — jamais filtré
+      const rawPC = nF();
+      if (qPC && !mt(rawPC, qPC)) continue;
+      const rawCY = qCY ? nF() : (sF(), '');
+      if (qCY && !mt(Nn(rawCY), qCY)) continue;
+      const rawCO = qCO ? nF() : (sF(), '');
+      if (qCO && !mt(Nn(rawCO), qCO)) continue;
+      const rawNI = qNI ? nF() : (sF(), '');
+      if (qNI && !mt(rawNI.replace(/[\s\-.]/g,''), qNI)) continue;
+      const rawEM = qEM ? nF() : (sF(), '');
+      if (qEM && !mt(Nn(rawEM), qEM)) continue;
+      const rawPH = qPH ? nF() : (sF(), '');
+      if (qPH && !mt(rawPH.replace(/\D/g,''), qPH)) continue;
+      const rawIB = qIB ? nF() : (sF(), '');
+      if (qIB && !mt(rawIB.replace(/\s/g,'').toLowerCase(), qIB)) continue;
+      if (qIP) { const rawIP = nF(); if (!mt(rawIP.trim(), qIP)) continue; }
+
+      const key = Nn(rawLN)+'|'+Nn(rawFN)+'|'+ND(rawBD)+'|'+rawPC;
+      if (seen.has(key)) continue;
+      seen.add(key); allIds.push(id);
+
+    } else {
+      const p = W.prev[id - W.binRowCount]; if (!p) continue;
+      if (qLN && !mt(p[F.ln], qLN)) continue;
+      if (qFN && !mt(p[F.fn], qFN)) continue;
+      if (qBF  && !mt(ND(p[F.bd]), qBF)) continue;
+      if (qYear  && !p[F.bd].includes(qYear))  continue;
+      if (qMonth && !p[F.bd].includes(qMonth)) continue;
+      if (qDay   && !p[F.bd].includes(qDay))   continue;
+      if (qST && !mt(p[F.st], qST)) continue;
+      if (qPC && !mt(p[F.pc], qPC)) continue;
+      if (qCY && !mt(p[F.cy], qCY)) continue;
+      if (qCO && !mt(p[F.co], qCO)) continue;
+      if (qNI && !mt(p[F.ni], qNI)) continue;
+      if (qEM && !mt(p[F.em], qEM)) continue;
+      if (qPH && !mt(p[F.ph], qPH)) continue;
+      if (qIB && !mt(p[F.ib], qIB)) continue;
+      if (qIP && !mt(p[F.ip], qIP)) continue;
+      const key = p[F.ln]+'|'+p[F.fn]+'|'+p[F.bd]+'|'+p[F.pc];
+      if (seen.has(key)) continue;
+      seen.add(key); allIds.push(id);
+    }
   }
-  return [...r].filter(id => !W.deleted.has(id));
+  return allIds;
 }
 
 // Lit une ligne depuis le buffer brut — zéro copie supplémentaire
@@ -246,49 +292,27 @@ app.get('/api/status', (req, res) => {
   });
 });
 
-// Recherche
-app.post('/api/search', (req, res) => {
+// Recherche — scan séquentiel dans le buffer brut
+app.post('/api/search', async (req, res) => {
   if (!W.loaded) return res.status(503).json({ error: 'Index non chargé' });
   const { query: q = {}, ts } = req.body;
   const t0 = Date.now();
-
-  const sets = [];
-  if (q.qLN)      sets.push(ps('lastName',   Nn(q.qLN)));
-  if (q.qFN)      sets.push(ps('firstName',  Nn(q.qFN)));
-  if (q.qNID)     sets.push(ps('nationalId', q.qNID.replace(/[\s\-.]/g,'')));
-  if (q.qEmail)   sets.push(ps('email',      Nn(q.qEmail)));
-  if (q.qPhone)   sets.push(ps('phone',      q.qPhone.replace(/\D/g,'')));
-  if (q.qIban)    sets.push(ps('iban',       q.qIban.replace(/\s/g,'').toLowerCase()));
-  if (q.qIp)      sets.push(ps('ip',         q.qIp.trim()));
-  if (q.qStreet)  sets.push(ps('street',     Nn(q.qStreet)));
-  if (q.qPostal)  sets.push(ps('postal',     q.qPostal.trim()));
-  if (q.qCity)    sets.push(ps('city',       Nn(q.qCity)));
-  if (q.qCountry) sets.push(ps('country',   Nn(q.qCountry)));
-  if (q.qBF)      sets.push(ps('birthFull',  ND(q.qBF)));
-  else {
-    if (q.qYear)  sets.push(ps('birthYear',  q.qYear.slice(0,4)));
-    if (q.qMonth) sets.push(ps('birthMonth', q.qMonth));
-    if (q.qDay)   sets.push(ps('birthDay',   q.qDay));
+  try {
+    const allIds = await scanSearch(q);
+    const srcStats = {};
+    allIds.forEach(id => {
+      const p = rowGet(id); if (!p) return;
+      const db = W.dbs[p[F.dbi]]; if (!db) return;
+      srcStats[db.name] = (srcStats[db.name] || 0) + 1;
+    });
+    const rows    = allIds.slice(0, 200).map(rowPreview).filter(Boolean);
+    const elapsed = Date.now() - t0;
+    console.log(`[search] ${elapsed}ms → ${allIds.length} résultats`);
+    res.json({ total: allIds.length, allIds, rows, ts: ts || Date.now(), srcStats, serverMs: elapsed });
+  } catch(e) {
+    console.error('[search] erreur:', e);
+    res.status(500).json({ error: e.message });
   }
-
-  const ids = intersect(sets);
-  const seen = new Set(), uniq = [];
-  for (const id of ids) {
-    const p = rowGet(id); if (!p) continue;
-    const k = p[F.ln]+'|'+p[F.fn]+'|'+p[F.bd]+'|'+p[F.pc];
-    if (!seen.has(k)) { seen.add(k); uniq.push(id); }
-  }
-  const srcStats = {};
-  uniq.forEach(id => {
-    const p = rowGet(id); if (!p) return;
-    const db = W.dbs[p[F.dbi]]; if (!db) return;
-    srcStats[db.name] = (srcStats[db.name] || 0) + 1;
-  });
-
-  const rows    = uniq.slice(0, 200).map(rowPreview).filter(Boolean);
-  const elapsed = Date.now() - t0;
-  console.log(`[search] ${elapsed}ms → ${uniq.length} résultats (${fmtN(W.totalActive)} total)`);
-  res.json({ total: uniq.length, allIds: uniq, rows, ts: ts || Date.now(), srcStats, serverMs: elapsed });
 });
 
 // Détail
@@ -328,33 +352,39 @@ app.post('/api/export', (req, res) => {
   res.json({ rows });
 });
 
-// Famille
-app.get('/api/fam/:id', (req, res) => {
+// Famille — scan séquentiel
+app.get('/api/fam/:id', async (req, res) => {
   if (!W.loaded) return res.status(503).json({ error: 'Index non chargé' });
   const id = parseInt(req.params.id, 10);
   const p  = rowGet(id); if (!p) return res.json({ id, results: [] });
   const ln = Nn(p[F.ln]), pc = p[F.pc], st = Nn(p[F.st]);
-  const sc = new Map();
-  const add = (rid, pts, reason) => {
-    if (rid === id || W.deleted.has(rid)) return;
-    const e = sc.get(rid) || { pts: 0, rs: new Set() };
-    e.pts += pts; e.rs.add(reason); sc.set(rid, e);
-  };
-  if (ln) ps('lastName', ln)?.forEach(x => add(x, 3, 'Même nom'));
-  if (pc) { const a = W.idx.postal.get(pc); if (a) a.forEach(x => add(x, 2, 'Même CP')); }
-  if (st) { const a = W.idx.street.get(st); if (a) a.forEach(x => add(x, 4, 'Même adresse')); }
+  const sc    = new Map();
+  const total = W.binRowCount + W.prev.length;
+  const YIELD = 50_000;
+  for (let rid = 0; rid < total; rid++) {
+    if (rid > 0 && rid % YIELD === 0) await tick();
+    if (rid === id || W.deleted.has(rid)) continue;
+    const r = rowGet(rid); if (!r) continue;
+    let pts = 0; const rs = new Set();
+    if (ln && Nn(r[F.ln]) === ln) { pts += 3; rs.add('Même nom'); }
+    if (pc && r[F.pc] === pc)     { pts += 2; rs.add('Même CP'); }
+    if (st && Nn(r[F.st]) === st) { pts += 4; rs.add('Même adresse'); }
+    if (pts >= 3) {
+      const e = sc.get(rid) || { pts: 0, rs: new Set() };
+      e.pts += pts; rs.forEach(x => e.rs.add(x)); sc.set(rid, e);
+    }
+  }
   const seen = new Set(), results = [];
   for (const [rid, { pts, rs }] of [...sc].sort((a,b) => b[1].pts - a[1].pts)) {
-    if (pts < 3) continue;
-    const fp  = rowGet(rid); if (!fp) continue;
-    const fdb = W.dbs[fp[F.dbi]]; if (!fdb) continue;
-    const k   = fp[F.ln]+'|'+fp[F.fn]+'|'+fp[F.bd];
+    if (results.length >= 25) break;
+    const fp = rowGet(rid); if (!fp) continue;
+    const k  = fp[F.ln]+'|'+fp[F.fn]+'|'+fp[F.bd];
     if (!seen.has(k)) {
       seen.add(k);
       results.push({ rid, rs: [...rs], ln: fp[F.ln], fn: fp[F.fn], bd: fp[F.bd], pc: fp[F.pc], cy: fp[F.cy] });
     }
   }
-  res.json({ id, results: results.slice(0, 25) });
+  res.json({ id, results });
 });
 
 // ── CSV loader (utilisé quand aucun .bin n'est disponible) ───────────────────
@@ -379,47 +409,6 @@ function detectCsv(headers) {
   for (const [f, p] of Object.entries(PAT_CSV))
     for (const h of headers) if (p.test(h)) { m[f] = h; break; }
   return m;
-}
-
-function addIdx(name, key, id) {
-  if (!key) return;
-  const m = W.idx[name];
-  if (!m.has(key)) m.set(key, []);
-  m.get(key).push(id);
-}
-
-function indexCsvRow(id, row, mp) {
-  const g  = key => mp[key] ? String(row[mp[key]] || '') : '';
-  const ln = Nn(g('lastName')),  fn = Nn(g('firstName'));
-  if (ln) addIdx('lastName',  ln,  id);
-  if (fn) addIdx('firstName', fn,  id);
-  const bd = ND(g('birthDate'));
-  if (bd) {
-    if (bd.length >= 8) {
-      addIdx('birthYear', bd.slice(0,4), id);
-      addIdx('birthMonth',bd.slice(4,6), id);
-      addIdx('birthDay',  bd.slice(6,8), id);
-    } else {
-      addIdx('birthFull', bd, id);
-      if (bd.length >= 4) addIdx('birthYear',  bd.slice(0,4), id);
-      if (bd.length >= 6) addIdx('birthMonth', bd.slice(4,6), id);
-    }
-  }
-  const em  = Nn(g('email'));
-  if (em) addIdx('email', em, id);
-  const ph  = String(row[mp.phone]     ||'').replace(/\D/g,'');
-  if (ph && ph !== '0') addIdx('phone', ph, id);
-  const ib  = String(row[mp.iban]      ||'').replace(/\s/g,'').toLowerCase();
-  if (ib) addIdx('iban', ib, id);
-  const ip  = String(row[mp.ip]        ||'').trim();
-  if (ip) addIdx('ip', ip, id);
-  const pc  = String(row[mp.postal]    ||'').trim();
-  if (pc) addIdx('postal', pc, id);
-  const cy  = Nn(g('city'));    if (cy) addIdx('city',      cy,  id);
-  const co  = Nn(g('country')); if (co) addIdx('country',   co,  id);
-  const nid = String(row[mp.nationalId]||'').replace(/[\s\-.]/g,'');
-  if (nid && nid !== '0') addIdx('nationalId', nid, id);
-  const st  = Nn(g('street')); if (st) addIdx('street', st, id);
 }
 
 function loadCsvFile(filePath) {
@@ -466,7 +455,6 @@ function loadCsvFile(filePath) {
         String(row[mapping.iban]       ||'').replace(/\s/g,'').toLowerCase(),
         String(row[mapping.ip]         ||'').trim()
       ]);
-      indexCsvRow(id, row, mapping);
       dbEntry.count++;
       W.totalActive++;
       rowCount++;
@@ -515,7 +503,7 @@ async function main() {
     W.loading = true;
     try {
       for (const f of binFiles) await loadBinFile(f);
-      await buildKeys();
+
       W.loaded = true;
     } catch(e) {
       W.loadError = e.message;
@@ -535,7 +523,7 @@ async function main() {
       W.loading = true;
       try {
         for (const f of csvFiles) await loadCsvFile(f);
-        await buildKeys();
+  
         W.loaded = true;
       } catch(e) {
         W.loadError = e.message;
