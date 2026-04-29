@@ -1383,8 +1383,22 @@ self.onmessage=function(e){
 };
 `;
 
-const blob = new Blob([WORKER_SRC], {type:'application/javascript'});
-const worker = new Worker(URL.createObjectURL(blob));
+// Worker créé uniquement en mode local — en mode serveur le navigateur est un client léger
+let _workerInstance = null;
+function _getWorker() {
+  if (!_workerInstance) {
+    const blob = new Blob([WORKER_SRC], {type:'application/javascript'});
+    _workerInstance = new Worker(URL.createObjectURL(blob));
+    _workerInstance.onmessage = function(e) { handleMsg(e.data); };
+  }
+  return _workerInstance;
+}
+const worker = {
+  postMessage: function(msg, transfer) {
+    if (SERVER.active) return;
+    _getWorker().postMessage(msg, transfer !== undefined ? transfer : undefined);
+  }
+};
 
 // ================================================================
 // SERVER MODE DETECTION
@@ -1615,14 +1629,14 @@ function initials(ln,fn){
 // ================================================================
 // WORKER MESSAGES
 // ================================================================
-worker.onmessage = function(e) {
-  const {type} = e.data;
+// Handler unifié — appelé directement par dispatchMsg (mode serveur) ou via worker.onmessage (mode local)
+function handleMsg(d) {
+  const type = d.type;
 
   if(type==='binProgress') {
-    const pct = e.data.pct || 0;
+    const pct = d.pct || 0;
     document.getElementById('lbar').style.width = pct + '%';
-    const phase = e.data.phase;
-    const cnt = e.data.count;
+    const phase = d.phase, cnt = d.count;
     if(phase==='rows' && cnt) {
       const c = cnt;
       document.getElementById('lcnt').textContent = c.toLocaleString() + ' lignes chargées…';
@@ -1635,13 +1649,12 @@ worker.onmessage = function(e) {
     return;
   }
 
-  else if(type==='binLoaded') {
-    UI.dbs = e.data.dbs;
-    UI.totalActive = e.data.totalActive;
+  if(type==='binLoaded') {
+    UI.dbs = d.dbs;
+    UI.totalActive = d.totalActive;
     const total = UI.totalActive;
     const disp = total>=1e9?(total/1e9).toFixed(2)+'B':total>=1e6?(total/1e6).toFixed(1)+'M':total.toLocaleString();
     document.getElementById('lstat-total').textContent = disp;
-    // Chargement multi-bins depuis cache : attendre que tous soient prêts
     if (UI._pendingCacheBins > 0) {
       UI._pendingCacheBins--;
       const done = UI._pendingCacheBinsTotal - UI._pendingCacheBins;
@@ -1653,7 +1666,7 @@ worker.onmessage = function(e) {
     if (fromCache) UI._pendingCacheBinsTotal = 0;
     UI.loadingFiles = 0;
     document.getElementById('lbar').style.width = '100%';
-    setTimeout(()=>{
+    setTimeout(function(){
       document.getElementById('loverlay').classList.remove('on');
       refreshDbUI();
       toast(fromCache
@@ -1663,86 +1676,90 @@ worker.onmessage = function(e) {
     return;
   }
 
-  else if(type==='progress') {
-    const cnt = e.data.count;
+  if(type==='progress') {
+    const cnt = d.count;
     document.getElementById('lcnt').textContent = cnt.toLocaleString() + ' lignes traitées…';
     const pct = Math.min(5 + Math.log10(Math.max(cnt,1)) / Math.log10(1e9) * 85, 90);
     document.getElementById('lbar').style.width = pct + '%';
-    document.getElementById('lstat-total').textContent = cnt >= 1e9 ? (cnt/1e9).toFixed(1)+'B' : cnt >= 1e6 ? (cnt/1e6).toFixed(1)+'M' : cnt >= 1e3 ? (cnt/1e3).toFixed(1)+'K' : cnt;
+    document.getElementById('lstat-total').textContent = cnt>=1e9?(cnt/1e9).toFixed(1)+'B':cnt>=1e6?(cnt/1e6).toFixed(1)+'M':cnt>=1e3?(cnt/1e3).toFixed(1)+'K':cnt;
+    return;
   }
 
-  else if(type==='loaded') {
-    UI.dbs.push({id:e.data.dbId,name:e.data.name,count:e.data.count});
-    UI.totalActive = e.data.totalActive;
+  if(type==='loaded') {
+    UI.dbs.push({id:d.dbId, name:d.name, count:d.count});
+    UI.totalActive = d.totalActive;
     UI.loadingFiles--;
     document.getElementById('lbar').style.width = '100%';
     const total = UI.totalActive;
-    const disp = total >= 1e9 ? (total/1e9).toFixed(2)+'B' : total >= 1e6 ? (total/1e6).toFixed(1)+'M' : total.toLocaleString();
+    const disp = total>=1e9?(total/1e9).toFixed(2)+'B':total>=1e6?(total/1e6).toFixed(1)+'M':total.toLocaleString();
     document.getElementById('lstat-total').textContent = disp;
-    setTimeout(()=>{
+    setTimeout(function(){
       if(UI.loadingFiles<=0){UI.loadingFiles=0;document.getElementById('loverlay').classList.remove('on');}
       refreshDbUI();
-      toast('✓ ' + e.data.name + ' — ' + e.data.count.toLocaleString() + ' entrées indexées','green');
-    },350);
+      toast('✓ ' + d.name + ' — ' + d.count.toLocaleString() + ' entrées indexées', 'green');
+    }, 350);
+    return;
   }
 
-  else if(type==='error') {
-    UI.loadingFiles=Math.max(0,UI.loadingFiles-1);
+  if(type==='error') {
+    UI.loadingFiles = Math.max(0, UI.loadingFiles-1);
     document.getElementById('loverlay').classList.remove('on');
-    toast('Erreur : '+e.data.msg,'red');
+    toast('Erreur : ' + d.msg, 'red');
+    return;
   }
 
-  else if(type==='results') {
-    const elapsed = Date.now() - e.data.ts;
+  if(type==='results') {
+    const elapsed = Date.now() - d.ts;
     document.getElementById('search-time').textContent = elapsed+'ms';
-    UI.results = e.data.rows;
-    UI.allIds = e.data.allIds;
-    UI.lastSrcStats = e.data.srcStats || {};
+    UI.results = d.rows;
+    UI.allIds = d.allIds;
+    UI.lastSrcStats = d.srcStats || {};
     UI.shown = 80; UI.sel = null; UI._searched = true;
-    document.getElementById('rcnt').textContent = e.data.total.toLocaleString();
+    document.getElementById('rcnt').textContent = d.total.toLocaleString();
     document.getElementById('rsummary').style.display = '';
-    document.getElementById('pbadge').textContent = e.data.total.toLocaleString();
+    document.getElementById('pbadge').textContent = d.total.toLocaleString();
     document.getElementById('sbtn').classList.remove('searching');
-    document.getElementById('export-btns').style.display = e.data.total > 0 ? '' : 'none';
+    document.getElementById('export-btns').style.display = d.total > 0 ? '' : 'none';
     ptab('list'); renderList();
-    // Save to history
-    saveHistory(e.data.total, elapsed);
-    // badge pop
+    saveHistory(d.total, elapsed);
     const b = document.getElementById('pbadge');
     b.classList.add('pop');
-    setTimeout(() => b.classList.remove('pop'), 400);
-    if(e.data.total > 0) SFX.play('result');
-    else SFX.play('error');
-    // scan sweep
+    setTimeout(function(){ b.classList.remove('pop'); }, 400);
+    if(d.total > 0) SFX.play('result'); else SFX.play('error');
     const card = document.getElementById('rpanel-card');
-    if(card){card.classList.add('scanning');setTimeout(()=>card.classList.remove('scanning'),1300)}
+    if(card){card.classList.add('scanning');setTimeout(function(){card.classList.remove('scanning');},1300);}
+    return;
   }
 
-  else if(type==='detail') {
-    if(!e.data.row)return;
-    renderDetailData(e.data.id,e.data.dbName,e.data.row);
+  if(type==='detail') {
+    if(!d.row) return;
+    renderDetailData(d.id, d.dbName, d.row);
     ptab('detail');
+    return;
   }
 
-  else if(type==='famResults') {
-    renderFamResults(e.data.id,e.data.results);
+  if(type==='famResults') {
+    renderFamResults(d.id, d.results);
+    return;
   }
 
-  else if(type==='removed') {
-    UI.dbs = e.data.dbs; UI.totalActive = e.data.totalActive;
+  if(type==='removed') {
+    UI.dbs = d.dbs; UI.totalActive = d.totalActive;
     UI.results=[]; UI.allIds=[]; UI.sel=null;
     document.getElementById('rsummary').style.display='none';
     document.getElementById('pbadge').textContent='0';
     document.getElementById('search-time').textContent='';
     document.getElementById('export-btns').style.display='none';
     refreshDbUI(); renderList();
-    toast(`Base "${e.data.removedName}" retirée.`);
+    toast('Base "' + d.removedName + '" retirée.');
+    return;
   }
 
-  else if(type==='exportData') {
-    handleExportData(e.data.rows);
+  if(type==='exportData') {
+    handleExportData(d.rows);
+    return;
   }
-};
+}
 
 // ================================================================
 // SERVER API — fonctions miroir du worker pour le mode serveur
@@ -1750,7 +1767,7 @@ worker.onmessage = function(e) {
 
 // Injecte un message synthétique dans le même handler que le worker
 function dispatchMsg(data) {
-  try { worker.onmessage({ data }); } catch(e) { console.error('dispatchMsg', e); }
+  try { handleMsg(data); } catch(e) { console.error('dispatchMsg', e); }
 }
 
 function updateSrvBadge() {
