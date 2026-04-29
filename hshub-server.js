@@ -17,7 +17,14 @@ const PORT = (() => {
 // ── State ─────────────────────────────────────────────────────────────────────
 const W = {
   dbs:  [],
-  prev: [],   // [dbi, ln, fn, bd, st, sn, pc, cy, co, ni, em, ph, ib, ip]
+  // Rows chargés depuis .bin — lecture à la demande dans le buffer brut (peu de RAM)
+  bufs:        [],    // Buffer[] — un par fichier .bin
+  rowBuf:      null,  // Uint8Array  — index dans bufs[] pour chaque ligne
+  rowPos:      null,  // Uint32Array — offset dans le buffer (après le champ dbi)
+  rowDbi:      null,  // Uint16Array — valeur dbi par ligne
+  binRowCount: 0,     // nombre de lignes issues de .bin
+  // Rows chargés depuis CSV — tableau JS classique (fallback)
+  prev: [],
   idx: {
     lastName:  new Map(), firstName: new Map(),
     birthFull: new Map(), birthYear: new Map(), birthMonth: new Map(), birthDay: new Map(),
@@ -79,7 +86,7 @@ async function loadBinFile(filePath) {
   console.log(`    → ${nb_rows.toLocaleString()} lignes, ${nb_dbs} base(s), ${nb_idx} champs indexés`);
 
   const dbiBase = W.dbs.length;
-  const rowBase = W.prev.length;
+  const rowBase = W.binRowCount;
 
   // — DBs —
   for (let i = 0; i < nb_dbs; i++) {
@@ -88,23 +95,43 @@ async function loadBinFile(filePath) {
     W.dbs.push({ id: `preloaded_${dbiBase+i}`, name, count });
   }
 
-  // — Rows — yield tous les 100k pour laisser passer les requêtes HTTP
+  // Garder le buffer en mémoire pour lecture à la demande
+  const bufIdx = W.bufs.length;
+  W.bufs.push(buf);
+
+  // Tableaux typés pour ce fichier — 26 octets/ligne au lieu de ~200 octets/ligne
+  const positions = new Uint32Array(nb_rows);
+  const dbis      = new Uint16Array(nb_rows);
+
+  // — Rows — on ne stocke QUE la position et le dbi, on saute les strings
   const t0    = Date.now();
   const YIELD = 100_000;
   for (let i = 0; i < nb_rows; i++) {
-    const dbi = readU16() + dbiBase;
-    const ln  = readStr16(), fn = readStr16(), bd = readStr16();
-    const st  = readStr16(), sn = readStr16(), pc = readStr16(), cy = readStr16(), co = readStr16();
-    const ni  = readStr16(), em = readStr16(), ph = readStr16(), ib = readStr16(), ip = readStr16();
-    W.prev.push([dbi, ln, fn, bd, st, sn, pc, cy, co, ni, em, ph, ib, ip]);
+    positions[i] = pos + 2; // offset du premier champ string (après dbi)
+    dbis[i]      = readU16() + dbiBase;
+    // Sauter les 13 champs string sans les parser
+    for (let f = 0; f < 13; f++) { const l = readU16(); pos += l; }
     W.totalActive++;
     if ((i+1) % YIELD === 0) {
       const spd = Math.round((i+1) / ((Date.now()-t0) / 1000));
       process.stdout.write(`\r    Lignes: ${(i+1).toLocaleString()}/${nb_rows.toLocaleString()} — ${(spd/1000).toFixed(0)}k/s   `);
-      await tick(); // yield → les requêtes /api/status peuvent passer ici
+      await tick();
     }
   }
   process.stdout.write('\n');
+
+  // Fusionner dans les tableaux globaux
+  const prevCount = W.binRowCount;
+  const newCount  = prevCount + nb_rows;
+  const newBuf    = new Uint8Array(newCount);
+  const newPos    = new Uint32Array(newCount);
+  const newDbi    = new Uint16Array(newCount);
+  if (prevCount > 0) { newBuf.set(W.rowBuf); newPos.set(W.rowPos); newDbi.set(W.rowDbi); }
+  newBuf.fill(bufIdx, prevCount);
+  newPos.set(positions, prevCount);
+  newDbi.set(dbis, prevCount);
+  W.rowBuf = newBuf; W.rowPos = newPos; W.rowDbi = newDbi;
+  W.binRowCount = newCount;
 
   // — Index — yield entre chaque champ indexé
   for (let i = 0; i < nb_idx; i++) {
@@ -158,14 +185,29 @@ function intersect(sets) {
   return [...r].filter(id => !W.deleted.has(id));
 }
 
+// Lit une ligne depuis le buffer brut — zéro copie supplémentaire
+function rowReadBin(id) {
+  const b = W.bufs[W.rowBuf[id]];
+  let p = W.rowPos[id];
+  function rs() { const l = b.readUInt16LE(p); p += 2; const s = b.toString('utf8', p, p+l); p += l; return s; }
+  const ln=rs(),fn=rs(),bd=rs(),st=rs(),sn=rs(),pc=rs(),cy=rs(),co=rs(),ni=rs(),em=rs(),ph=rs(),ib=rs(),ip=rs();
+  return [W.rowDbi[id], ln, fn, bd, st, sn, pc, cy, co, ni, em, ph, ib, ip];
+}
+
+// Dispatch : .bin (lecture buffer) ou CSV (tableau JS)
+function rowGet(id) {
+  if (id < W.binRowCount) return rowReadBin(id);
+  const p = W.prev[id - W.binRowCount]; return p || null;
+}
+
 function rowPreview(id) {
-  const p = W.prev[id]; if (!p) return null;
+  const p = rowGet(id); if (!p) return null;
   const db = W.dbs[p[F.dbi]]; if (!db) return null;
   return { id, dbName: db.name, ln: p[F.ln], fn: p[F.fn], bd: p[F.bd], pc: p[F.pc], cy: p[F.cy] };
 }
 
 function rowDetail(id) {
-  const p = W.prev[id]; if (!p) return null;
+  const p = rowGet(id); if (!p) return null;
   const db = W.dbs[p[F.dbi]]; if (!db) return null;
   const all = {};
   const add = (k,v) => { if (v && v !== '0') all[k] = v; };
@@ -232,13 +274,13 @@ app.post('/api/search', (req, res) => {
   const ids = intersect(sets);
   const seen = new Set(), uniq = [];
   for (const id of ids) {
-    const p = W.prev[id]; if (!p) continue;
+    const p = rowGet(id); if (!p) continue;
     const k = p[F.ln]+'|'+p[F.fn]+'|'+p[F.bd]+'|'+p[F.pc];
     if (!seen.has(k)) { seen.add(k); uniq.push(id); }
   }
   const srcStats = {};
   uniq.forEach(id => {
-    const p = W.prev[id]; if (!p) return;
+    const p = rowGet(id); if (!p) return;
     const db = W.dbs[p[F.dbi]]; if (!db) return;
     srcStats[db.name] = (srcStats[db.name] || 0) + 1;
   });
@@ -256,8 +298,8 @@ app.get('/api/detail/:id', (req, res) => {
   if (isNaN(id)) return res.status(400).json({ error: 'ID invalide' });
   const row = rowDetail(id);
   if (!row) return res.status(404).json({ error: 'Introuvable' });
-  const p  = W.prev[id];
-  const db = W.dbs[p[F.dbi]];
+  const p  = rowGet(id);
+  const db = p ? W.dbs[p[F.dbi]] : null;
   res.json({ id, dbName: db ? db.name : '', row });
 });
 
@@ -274,7 +316,7 @@ app.post('/api/export', (req, res) => {
   if (!W.loaded) return res.status(503).json({ error: 'Index non chargé' });
   const { allIds = [] } = req.body;
   const rows = allIds.slice(0, 100_000).map(id => {
-    const p = W.prev[id]; if (!p) return null;
+    const p = rowGet(id); if (!p) return null;
     const db = W.dbs[p[F.dbi]];
     return {
       source: db ? db.name : '', nom: p[F.ln], prenom: p[F.fn], dateNaissance: p[F.bd],
@@ -290,7 +332,7 @@ app.post('/api/export', (req, res) => {
 app.get('/api/fam/:id', (req, res) => {
   if (!W.loaded) return res.status(503).json({ error: 'Index non chargé' });
   const id = parseInt(req.params.id, 10);
-  const p  = W.prev[id]; if (!p) return res.json({ id, results: [] });
+  const p  = rowGet(id); if (!p) return res.json({ id, results: [] });
   const ln = Nn(p[F.ln]), pc = p[F.pc], st = Nn(p[F.st]);
   const sc = new Map();
   const add = (rid, pts, reason) => {
@@ -304,7 +346,7 @@ app.get('/api/fam/:id', (req, res) => {
   const seen = new Set(), results = [];
   for (const [rid, { pts, rs }] of [...sc].sort((a,b) => b[1].pts - a[1].pts)) {
     if (pts < 3) continue;
-    const fp  = W.prev[rid]; if (!fp) continue;
+    const fp  = rowGet(rid); if (!fp) continue;
     const fdb = W.dbs[fp[F.dbi]]; if (!fdb) continue;
     const k   = fp[F.ln]+'|'+fp[F.fn]+'|'+fp[F.bd];
     if (!seen.has(k)) {
@@ -410,7 +452,7 @@ function loadCsvFile(filePath) {
       const vals = line.split(delim).map(v => v.trim().replace(/^["']|["']$/g,''));
       const row  = {};
       headers.forEach((h, i) => { row[h] = vals[i] || ''; });
-      const id = W.prev.length;
+      const id = W.binRowCount + W.prev.length;
       const g  = key => mapping[key] ? String(row[mapping[key]] || '') : '';
       W.prev.push([
         dbiIdx,
