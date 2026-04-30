@@ -8,6 +8,10 @@ const express = require('express');
 const fs      = require('fs');
 const path    = require('path');
 
+// better-sqlite3 — optionnel : si absent le serveur tombe en mode scan
+let BetterSQLite = null;
+try { BetterSQLite = require('better-sqlite3'); } catch(_) {}
+
 const DIR  = process.cwd();
 const PORT = (() => {
   const i = process.argv.indexOf('--port');
@@ -23,6 +27,7 @@ const W = {
   rowPos:      null,  // Uint32Array — offset dans le fichier (après le champ dbi)
   rowDbi:      null,  // Uint16Array — valeur dbi par ligne
   binRowCount: 0,
+  db:          null,  // better-sqlite3 Database — index inversé (si index.sqlite présent)
   prev: [],
   deleted:     new Set(),
   totalActive: 0,
@@ -48,52 +53,74 @@ async function loadBufs() {
   return Promise.all(W.files.map(fi => fs.promises.readFile(fi.path)));
 }
 
-// ── Binary loader — construit l'index de positions, NE garde PAS le buffer ───
+// ── Binary loader — lecture par morceaux, JAMAIS de readFile(145MB) ──────────
+// Alloue max 4MB à la fois → RSS reste bas après démarrage
+const SCAN_CHUNK = 4 * 1024 * 1024; // fenêtre glissante 4MB
+
 async function loadBinFile(filePath) {
-  const label  = path.basename(filePath);
-  const size   = fs.statSync(filePath).size;
+  const label = path.basename(filePath);
+  const size  = (await fs.promises.stat(filePath)).size;
   console.log(`\n[•] ${label} (${fmtB(size)})`);
 
-  const buf = await fs.promises.readFile(filePath);
-  let pos = 0;
+  const fd    = await fs.promises.open(filePath, 'r');
+  const chunk = Buffer.allocUnsafe(SCAN_CHUNK);
+  let cBase   = 0;  // offset fichier de chunk[0]
+  let cLen    = 0;  // octets valides dans chunk
+  let cPos    = 0;  // curseur dans chunk
 
-  const readU8    = ()     => buf[pos++];
-  const readU16   = ()     => { const v = buf.readUInt16LE(pos); pos += 2; return v; };
-  const readU32   = ()     => { const v = buf.readUInt32LE(pos); pos += 4; return v; };
-  const readStr16 = ()     => { const l = readU16(); const s = buf.toString('utf8', pos, pos+l); pos += l; return s; };
-  const readStr8  = ()     => { const l = readU8();  const s = buf.toString('utf8', pos, pos+l); pos += l; return s; };
+  // Garantit au moins `need` octets lisibles depuis cPos
+  const ensure = async (need) => {
+    if (cLen - cPos >= need) return;
+    const rem = cLen - cPos;
+    if (rem > 0) chunk.copy(chunk, 0, cPos, cLen);
+    cBase += cPos; cPos = 0; cLen = rem;
+    const { bytesRead } = await fd.read(chunk, cLen, SCAN_CHUNK - cLen, cBase + cLen);
+    cLen += bytesRead;
+  };
+
+  // Helpers de lecture dans le chunk
+  const u8   = ()  => chunk[cPos++];
+  const u16  = ()  => { const v = chunk.readUInt16LE(cPos); cPos += 2; return v; };
+  const u32  = ()  => { const v = chunk.readUInt32LE(cPos); cPos += 4; return v; };
+  const s8   = ()  => { const l = u8();  const s = chunk.toString('utf8', cPos, cPos+l); cPos += l; return s; };
+  const s16  = ()  => { const l = u16(); const s = chunk.toString('utf8', cPos, cPos+l); cPos += l; return s; };
+  const sk16 = ()  => { cPos += 2 + chunk.readUInt16LE(cPos); }; // skip string16
+
+  // Chargement initial
+  await ensure(SCAN_CHUNK);
 
   // — Magic & header —
-  const magic = buf.toString('ascii', 0, 4); pos = 4;
-  if (magic !== 'HSHB') throw new Error(`${label}: fichier invalide (magic="${magic}")`);
-
-  readU16(); // version
-  const nb_dbs  = readU32();
-  const nb_rows = readU32();
-  const nb_idx  = readU32();
+  const magic = chunk.toString('ascii', 0, 4); cPos = 4;
+  if (magic !== 'HSHB') { await fd.close(); throw new Error(`${label}: magic invalide ("${magic}")`); }
+  u16(); // version
+  const nb_dbs  = u32();
+  const nb_rows = u32();
+  const nb_idx  = u32();
   console.log(`    → ${nb_rows.toLocaleString()} lignes, ${nb_dbs} base(s), ${nb_idx} champs indexés`);
 
   const dbiBase = W.dbs.length;
-  const rowBase = W.binRowCount;
 
   // — DBs —
   for (let i = 0; i < nb_dbs; i++) {
-    const name  = readStr16();
-    const count = readU32();
+    const name  = s16();
+    const count = u32();
     W.dbs.push({ id: `preloaded_${dbiBase+i}`, name, count });
   }
 
-  // Tableaux typés pour ce fichier — position + dbi seulement
+  // Tableaux typés — position + dbi seulement (~26MB total pour 3.75M lignes)
   const positions = new Uint32Array(nb_rows);
   const dbis      = new Uint16Array(nb_rows);
+  const t0        = Date.now();
+  const YIELD     = 100_000;
 
-  // — Rows — on stocke UNIQUEMENT la position et le dbi, pas les strings
-  const t0    = Date.now();
-  const YIELD = 100_000;
   for (let i = 0; i < nb_rows; i++) {
-    positions[i] = pos + 2; // offset du premier champ string (après dbi u16)
-    dbis[i]      = readU16() + dbiBase;
-    for (let f = 0; f < 13; f++) { const l = readU16(); pos += l; }
+    // Worst-case row : 2 + 13*(2+255) = 3343 octets — 4096 est sûr
+    if (cLen - cPos < 4096) await ensure(4096);
+
+    positions[i] = cBase + cPos + 2; // offset fichier absolu du 1er champ string (après dbi u16)
+    dbis[i]      = u16() + dbiBase;
+    for (let f = 0; f < 13; f++) sk16();
+
     W.totalActive++;
     if ((i+1) % YIELD === 0) {
       const spd = Math.round((i+1) / ((Date.now()-t0) / 1000));
@@ -103,8 +130,23 @@ async function loadBinFile(filePath) {
   }
   process.stdout.write('\n');
 
-  // Enregistrer le fichier (chemin seulement, PAS le buffer)
-  W.files.push({ path: filePath, rowBase, rowCount: nb_rows });
+  await fd.close(); // chunk de 4MB libéré ici — index section ignorée
+
+  // Enregistrer le fichier
+  W.files.push({ path: filePath, rowBase: W.binRowCount, rowCount: nb_rows });
+
+  // Ouvrir l'index SQLite compagnon si disponible
+  if (!W.db && BetterSQLite) {
+    const sqlitePath = filePath.replace(/\.bin$/i, '') + '.sqlite';
+    if (fs.existsSync(sqlitePath)) {
+      try {
+        W.db = BetterSQLite(sqlitePath, { readonly: true });
+        console.log(`    → Index SQLite chargé (recherche rapide activée)`);
+      } catch(e) {
+        console.warn(`    ⚠  SQLite non chargé: ${e.message}`);
+      }
+    }
+  }
 
   // Fusionner dans les tableaux globaux
   const prevCount = W.binRowCount;
@@ -119,21 +161,9 @@ async function loadBinFile(filePath) {
   W.rowBuf = newBuf; W.rowPos = newPos; W.rowDbi = newDbi;
   W.binRowCount = newCount;
 
-  // — Index — ignoré : recherche par scan
-  for (let i = 0; i < nb_idx; i++) {
-    const nl = readU8(); pos += nl;
-    const nb_keys = readU32();
-    for (let k = 0; k < nb_keys; k++) {
-      const kl = buf.readUInt16LE(pos); pos += 2 + kl;
-      const nb_ids = buf.readUInt32LE(pos); pos += 4 + nb_ids * 4;
-    }
-    await tick();
-  }
-
-  // buf sort de scope ici → GC automatique (aucune référence conservée)
   const elapsed = ((Date.now()-t0)/1000).toFixed(1);
   const mem     = Math.round(process.memoryUsage().heapUsed / 1e6);
-  console.log(`    ✓  Index positions en ${elapsed}s  —  heap: ${mem} MB`);
+  console.log(`    ✓  Positions indexées en ${elapsed}s  —  heap: ${mem} MB`);
 }
 
 // ── Lecture d'une seule ligne depuis le fichier (pour detail/preview) ─────────
@@ -287,6 +317,128 @@ async function scanSearch(q, bufs) {
   return allIds;
 }
 
+// ── Recherche SQLite — index inversé, O(résultats) pas O(total) ──────────────
+
+// Intersecte deux Uint32Array triées en O(a+b)
+function intersect(a, b) {
+  const r = new Uint32Array(Math.min(a.length, b.length));
+  let i = 0, j = 0, n = 0;
+  while (i < a.length && j < b.length) {
+    if      (a[i] === b[j]) { r[n++] = a[i]; i++; j++; }
+    else if (a[i]  <  b[j]) i++;
+    else                     j++;
+  }
+  return r.subarray(0, n);
+}
+
+// Union + tri de plusieurs BLOBs d'IDs (pour les requêtes préfixe/wildcard)
+function mergeBlobs(blobs) {
+  let total = 0;
+  for (const b of blobs) total += b.byteLength >> 2;
+  const all = new Uint32Array(total);
+  let off = 0;
+  for (const b of blobs) {
+    const arr = new Uint32Array(b.buffer, b.byteOffset, b.byteLength >> 2);
+    all.set(arr, off); off += arr.length;
+  }
+  all.sort();
+  return all;
+}
+
+// Récupère les IDs pour un champ/clé depuis SQLite (supporte wildcard '*')
+const _stmtCache = new Map();
+function getStmt(table, wildcard) {
+  const key = table + (wildcard ? '*' : '=');
+  if (!_stmtCache.has(key)) {
+    const sql = wildcard
+      ? `SELECT ids FROM "${table}" WHERE key LIKE ? ESCAPE '\\'`
+      : `SELECT ids FROM "${table}" WHERE key=?`;
+    _stmtCache.set(key, W.db.prepare(sql));
+  }
+  return _stmtCache.get(key);
+}
+
+function sqliteIds(table, rawKey) {
+  if (!rawKey) return null;
+  if (rawKey.endsWith('*')) {
+    const prefix = rawKey.slice(0, -1).replace(/[%_\\]/g, c => '\\' + c);
+    const rows = getStmt(table, true).all(prefix + '%');
+    if (!rows.length) return new Uint32Array(0);
+    return mergeBlobs(rows.map(r => r.ids));
+  }
+  const row = getStmt(table, false).get(rawKey);
+  if (!row) return new Uint32Array(0);
+  return new Uint32Array(row.ids.buffer, row.ids.byteOffset, row.ids.byteLength >> 2);
+}
+
+// narrow : intersecte le résultat courant avec un nouveau jeu d'IDs
+// Retourne false si résultat vide (permet de court-circuiter)
+function narrow(result, ids) {
+  if (ids === null) return result;           // champ non renseigné → pas de filtre
+  if (result === null) return ids;           // premier filtre
+  const r = intersect(result, ids);
+  return r;
+}
+
+function sqliteSearch(q) {
+  let result = null;
+
+  const n = (table, key) => {
+    if (!key) return true;
+    const ids = sqliteIds(table, key);
+    result = narrow(result, ids);
+    return result === null || result.length > 0;
+  };
+
+  if (!n('lastName',  q.qLN    ? NnF(q.qLN)                              : null)) return [];
+  if (!n('firstName', q.qFN    ? NnF(q.qFN)                              : null)) return [];
+  if (q.qBF) {
+    if (!n('birthFull', ND(q.qBF))) return [];
+  } else {
+    if (!n('birthYear',  q.qYear  ? q.qYear.slice(0, 4)                  : null)) return [];
+    if (!n('birthMonth', q.qMonth ? q.qMonth                             : null)) return [];
+    if (!n('birthDay',   q.qDay   ? q.qDay                               : null)) return [];
+  }
+  if (!n('street',    q.qStreet  ? NnF(q.qStreet)                        : null)) return [];
+  if (!n('postal',    q.qPostal  ? q.qPostal.trim()                      : null)) return [];
+  if (!n('city',      q.qCity    ? NnF(q.qCity)                          : null)) return [];
+  if (!n('country',   q.qCountry ? NnF(q.qCountry)                       : null)) return [];
+  if (!n('nationalId',q.qNID     ? q.qNID.replace(/[\s\-.]/g,'')         : null)) return [];
+  if (!n('email',     q.qEmail   ? NnF(q.qEmail)                         : null)) return [];
+  if (!n('phone',     q.qPhone   ? q.qPhone.replace(/\D/g,'')            : null)) return [];
+  if (!n('iban',      q.qIban    ? q.qIban.replace(/\s/g,'').toLowerCase(): null)) return [];
+  if (!n('ip',        q.qIp      ? q.qIp.trim()                          : null)) return [];
+
+  if (result === null) return []; // aucun champ renseigné
+  return Array.from(result);
+}
+
+// Lecture groupée de N lignes depuis le .bin — 1 open/close par fichier
+async function rowReadBatch(ids) {
+  const byFile = new Map();
+  for (const id of ids) {
+    if (id >= W.binRowCount) continue;
+    const fi = W.rowBuf[id];
+    if (!byFile.has(fi)) byFile.set(fi, []);
+    byFile.get(fi).push(id);
+  }
+  const result = new Map();
+  for (const [fi, fileIds] of byFile) {
+    const fh    = await fs.promises.open(W.files[fi].path, 'r');
+    const chunk = Buffer.allocUnsafe(4096);
+    try {
+      for (const id of fileIds) {
+        await fh.read(chunk, 0, 4096, W.rowPos[id]);
+        let p = 0;
+        const rs = () => { const l=chunk.readUInt16LE(p); p+=2; const s=chunk.toString('utf8',p,p+l); p+=l; return s; };
+        const ln=rs(),fn=rs(),bd=rs(),st=rs(),sn=rs(),pc=rs(),cy=rs(),co=rs(),ni=rs(),em=rs(),ph=rs(),ib=rs(),ip=rs();
+        result.set(id, [W.rowDbi[id], ln,fn,bd,st,sn,pc,cy,co,ni,em,ph,ib,ip]);
+      }
+    } finally { await fh.close(); }
+  }
+  return result;
+}
+
 // ── Express ───────────────────────────────────────────────────────────────────
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -308,24 +460,49 @@ app.get('/api/status', (req, res) => {
   });
 });
 
-// Recherche — charge les buffers le temps du scan, puis libère
+// Recherche — SQLite (rapide) ou scan (fallback)
 app.post('/api/search', async (req, res) => {
   if (!W.loaded) return res.status(503).json({ error: 'Index non chargé' });
   const { query: q = {}, ts } = req.body;
   const t0 = Date.now();
   try {
-    const bufs   = await loadBufs();
-    const allIds = await scanSearch(q, bufs);
+    let allIds;
+    let mode;
+
+    if (W.db) {
+      // ── Mode SQLite : index inversé, pas de lecture fichier ──────────
+      allIds = sqliteSearch(q);
+      mode   = 'sqlite';
+    } else {
+      // ── Mode scan : charge .bin temporairement, scanne, libère ───────
+      const bufs = await loadBufs();
+      allIds = await scanSearch(q, bufs);
+      mode   = 'scan';
+    }
+
+    // srcStats via W.rowDbi (déjà en mémoire — pas de lecture fichier)
     const srcStats = {};
-    allIds.forEach(id => {
-      const p = rowGet(id, bufs); if (!p) return;
-      const db = W.dbs[p[F.dbi]]; if (!db) return;
-      srcStats[db.name] = (srcStats[db.name] || 0) + 1;
-    });
-    const rows    = allIds.slice(0, 200).map(id => rowPreview(id, bufs)).filter(Boolean);
-    // bufs libérés ici (sort de scope)
+    for (const id of allIds) {
+      const dbi = id < W.binRowCount ? W.rowDbi[id] : (W.prev[id - W.binRowCount]?.[F.dbi] ?? -1);
+      const db  = W.dbs[dbi];
+      if (db) srcStats[db.name] = (srcStats[db.name] || 0) + 1;
+    }
+
+    // Top 200 previews — 1 open/close par fichier .bin (groupé)
+    const top200  = allIds.slice(0, 200);
+    const binPart = top200.filter(id => id < W.binRowCount);
+    const rowMap  = await rowReadBatch(binPart);
+    const rows    = top200.map(id => {
+      let p;
+      if (id < W.binRowCount) p = rowMap.get(id);
+      else p = W.prev[id - W.binRowCount] || null;
+      if (!p) return null;
+      const db = W.dbs[p[F.dbi]];
+      return { id, dbName: db ? db.name : '', ln: p[F.ln], fn: p[F.fn], bd: p[F.bd], pc: p[F.pc], cy: p[F.cy] };
+    }).filter(Boolean);
+
     const elapsed = Date.now() - t0;
-    console.log(`[search] ${elapsed}ms → ${allIds.length} résultats`);
+    console.log(`[search:${mode}] ${elapsed}ms → ${allIds.length} résultats`);
     res.json({ total: allIds.length, allIds, rows, ts: ts || Date.now(), srcStats, serverMs: elapsed });
   } catch(e) {
     console.error('[search] erreur:', e);

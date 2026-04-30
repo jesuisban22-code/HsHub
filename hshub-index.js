@@ -141,59 +141,81 @@ const dbs=[];
 async function assembleBin(){
   flushIdx();
   await Promise.all([new Promise(r=>rowsStream.end(r)),new Promise(r=>idxStream.end(r))]);
-  console.log(`\n💾 Assemblage du fichier .bin…`);
-  process.stdout.write('  ↳ Fusion des index…');
-  const globalIdx=makeEmptyIdx();
-  const idxNames=Object.keys(globalIdx);
+  console.log(`\n💾 Assemblage…`);
+  const idxNames=Object.keys(makeEmptyIdx());
   const idxFd=fs.openSync(TMP_IDX,'r');
   const idxSize=fs.statSync(TMP_IDX).size;
   let idxPos=0;
   function readExact(fd,pos,len){const buf=Buffer.allocUnsafe(len);let got=0;while(got<len){const n=fs.readSync(fd,buf,got,len-got,pos+got);if(n===0)break;got+=n;}return buf;}
-  while(idxPos<idxSize){
-    const hdr=readExact(idxFd,idxPos,8);const cs=hdr.readUInt32LE(0);idxPos+=8;
-    for(const name of idxNames){
-      const nb=readExact(idxFd,idxPos,1);const nl=nb.readUInt8(0);idxPos+=1+nl;
-      const nkb=readExact(idxFd,idxPos,4);const nk=nkb.readUInt32LE(0);idxPos+=4;
-      const gm=globalIdx[name];
-      for(let k=0;k<nk;k++){
-        const klb=readExact(idxFd,idxPos,2);const kl=klb.readUInt16LE(0);idxPos+=2;
-        const kb=readExact(idxFd,idxPos,kl);idxPos+=kl;const key=kb.toString('utf8');
-        const nib=readExact(idxFd,idxPos,4);const ni=nib.readUInt32LE(0);idxPos+=4;
-        const ib=readExact(idxFd,idxPos,ni*4);idxPos+=ni*4;
-        if(!gm.has(key))gm.set(key,[]);const arr=gm.get(key);
-        for(let i=0;i<ni;i++)arr.push(cs+ib.readUInt32LE(i*4));
-      }
+
+  // ── 1. Index inversé → SQLite ──────────────────────────────────────────
+  const sqliteFile=outputFile.replace(/\.bin$/,'')+'.sqlite';
+  let sqliteOk=false;
+  try{
+    const BS=require('better-sqlite3');
+    if(fs.existsSync(sqliteFile))fs.unlinkSync(sqliteFile);
+    const DB=BS(sqliteFile);
+    DB.pragma('journal_mode=WAL');DB.pragma('synchronous=OFF');
+    DB.pragma('page_size=8192');DB.pragma('cache_size=-131072');
+    for(const t of idxNames)DB.exec(`CREATE TABLE "${t}"(key TEXT PRIMARY KEY,ids BLOB)WITHOUT ROWID`);
+    DB.exec(`CREATE TABLE _meta(k TEXT PRIMARY KEY,v TEXT)`);
+    DB.prepare(`INSERT OR REPLACE INTO _meta VALUES('totalRows',?)`).run(String(globalRowId));
+    DB.prepare(`INSERT OR REPLACE INTO _meta VALUES('dbs',?)`).run(JSON.stringify(dbs));
+    const stmts={};
+    for(const t of idxNames)stmts[t]=DB.prepare(`INSERT INTO "${t}"(key,ids)VALUES(?,?)ON CONFLICT(key)DO UPDATE SET ids=ids||excluded.ids`);
+    process.stdout.write('  ↳ SQLite index…');
+    let chunks=0;
+    while(idxPos<idxSize){
+      const hdr=readExact(idxFd,idxPos,8);const cs=hdr.readUInt32LE(0);idxPos+=8;
+      const tx=DB.transaction(()=>{
+        for(const name of idxNames){
+          const nb=readExact(idxFd,idxPos,1);const nl=nb.readUInt8(0);idxPos+=1+nl;
+          const nkb=readExact(idxFd,idxPos,4);const nk=nkb.readUInt32LE(0);idxPos+=4;
+          const stmt=stmts[name];
+          for(let k=0;k<nk;k++){
+            const klb=readExact(idxFd,idxPos,2);const kl=klb.readUInt16LE(0);idxPos+=2;
+            const kb=readExact(idxFd,idxPos,kl);idxPos+=kl;
+            const nib=readExact(idxFd,idxPos,4);const ni=nib.readUInt32LE(0);idxPos+=4;
+            const ib=readExact(idxFd,idxPos,ni*4);idxPos+=ni*4;
+            // IDs locaux → IDs globaux (triés car chunkStart croissant)
+            const gids=Buffer.allocUnsafe(ni*4);
+            for(let i=0;i<ni;i++)gids.writeUInt32LE(cs+ib.readUInt32LE(i*4),i*4);
+            stmt.run(kb.toString('utf8'),gids);
+          }
+        }
+      });
+      tx();
+      if(++chunks%100===0)process.stdout.write('.');
     }
+    DB.close();
+    const sz=fs.statSync(sqliteFile).size;
+    console.log(` ✓  (${(sz/1024/1024).toFixed(0)} Mo)`);
+    sqliteOk=true;
+  }catch(e){
+    console.warn(`\n  ⚠  better-sqlite3 manquant — lancez: npm install (${e.message})`);
   }
   fs.closeSync(idxFd);
-  console.log(' ✓');
+
+  // ── 2. Données brutes → .bin (sans section index) ──────────────────────
   const outFd=fs.openSync(outputFile,'w');let outPos=0;
   const wb=buf=>{fs.writeSync(outFd,buf,0,buf.length,outPos);outPos+=buf.length;};
   const u8=v=>{const b=Buffer.allocUnsafe(1);b.writeUInt8(v,0);return b;};
   const u16=v=>{const b=Buffer.allocUnsafe(2);b.writeUInt16LE(v,0);return b;};
   const u32=v=>{const b=Buffer.allocUnsafe(4);b.writeUInt32LE(v,0);return b;};
-  wb(Buffer.from('HSHB','ascii'));wb(u16(1));wb(u32(dbs.length));wb(u32(globalRowId));wb(u32(idxNames.length));
+  // nb_idx=0 : index désormais dans SQLite, pas embarqué dans le .bin
+  wb(Buffer.from('HSHB','ascii'));wb(u16(1));wb(u32(dbs.length));wb(u32(globalRowId));wb(u32(0));
   for(const db of dbs){const nb=enc(db.name);wb(u16(nb.length));wb(nb);wb(u32(db.count));}
   process.stdout.write('  ↳ Écriture des lignes…');
   const rowFd=fs.openSync(TMP_ROWS,'r');const rowSize=fs.statSync(TMP_ROWS).size;
   const RBUF=Buffer.allocUnsafe(8*1024*1024);let rPos=0,dots=0;
   while(rPos<rowSize){const n=fs.readSync(rowFd,RBUF,0,RBUF.length,rPos);if(n===0)break;fs.writeSync(outFd,RBUF,0,n,outPos);outPos+=n;rPos+=n;if(++dots%64===0)process.stdout.write('.');}
   fs.closeSync(rowFd);console.log(' ✓');
-  process.stdout.write('  ↳ Écriture de l\'index…');
-  for(const name of idxNames){
-    const map=globalIdx[name];const nb=Buffer.from(name,'ascii');
-    wb(u8(nb.length));wb(nb);wb(u32(map.size));
-    for(const[key,ids]of map.entries()){
-      const kb=enc(key);wb(u16(kb.length));wb(kb);wb(u32(ids.length));
-      const ibuf=Buffer.allocUnsafe(ids.length*4);for(let i=0;i<ids.length;i++)ibuf.writeUInt32LE(ids[i],i*4);wb(ibuf);
-    }
-  }
-  console.log(' ✓');
   fs.closeSync(outFd);
   try{fs.unlinkSync(TMP_ROWS);}catch(_){}try{fs.unlinkSync(TMP_IDX);}catch(_){}
   const outSize=fs.statSync(outputFile).size;
-  console.log(`\n✅ ${outputFile} — ${(outSize/1024/1024).toFixed(1)} Mo`);
-  console.log(`Pour utiliser : placez index.bin à côté de hshub_v5.html\n`);
+  console.log(`\n✅ ${outputFile}  (${(outSize/1024/1024).toFixed(1)} Mo)  — données brutes`);
+  if(sqliteOk)console.log(`✅ ${sqliteFile}  — index inversé (recherche rapide)`);
+  console.log(`\nPlacez ces deux fichiers à côté de hshub-server.js\n`);
 }
 async function main(){
   console.log(`\nHsHub Pre-Indexer (streaming + chunked)`);
