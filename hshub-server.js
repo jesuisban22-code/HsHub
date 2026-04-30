@@ -442,6 +442,14 @@ async function rowReadBatch(ids) {
 // ── Express ───────────────────────────────────────────────────────────────────
 const app = express();
 app.use(express.json({ limit: '10mb' }));
+// CORS — autorise le frontend-server à appeler l'API depuis un autre port/domaine
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin',  '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
 app.use((req, res, next) => {
   if (/\.(bin|csv)$/i.test(req.path)) return res.status(403).end();
   next();
