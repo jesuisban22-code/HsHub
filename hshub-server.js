@@ -48,52 +48,74 @@ async function loadBufs() {
   return Promise.all(W.files.map(fi => fs.promises.readFile(fi.path)));
 }
 
-// ── Binary loader — construit l'index de positions, NE garde PAS le buffer ───
+// ── Binary loader — lecture par morceaux, JAMAIS de readFile(145MB) ──────────
+// Alloue max 4MB à la fois → RSS reste bas après démarrage
+const SCAN_CHUNK = 4 * 1024 * 1024; // fenêtre glissante 4MB
+
 async function loadBinFile(filePath) {
-  const label  = path.basename(filePath);
-  const size   = fs.statSync(filePath).size;
+  const label = path.basename(filePath);
+  const size  = (await fs.promises.stat(filePath)).size;
   console.log(`\n[•] ${label} (${fmtB(size)})`);
 
-  const buf = await fs.promises.readFile(filePath);
-  let pos = 0;
+  const fd    = await fs.promises.open(filePath, 'r');
+  const chunk = Buffer.allocUnsafe(SCAN_CHUNK);
+  let cBase   = 0;  // offset fichier de chunk[0]
+  let cLen    = 0;  // octets valides dans chunk
+  let cPos    = 0;  // curseur dans chunk
 
-  const readU8    = ()     => buf[pos++];
-  const readU16   = ()     => { const v = buf.readUInt16LE(pos); pos += 2; return v; };
-  const readU32   = ()     => { const v = buf.readUInt32LE(pos); pos += 4; return v; };
-  const readStr16 = ()     => { const l = readU16(); const s = buf.toString('utf8', pos, pos+l); pos += l; return s; };
-  const readStr8  = ()     => { const l = readU8();  const s = buf.toString('utf8', pos, pos+l); pos += l; return s; };
+  // Garantit au moins `need` octets lisibles depuis cPos
+  const ensure = async (need) => {
+    if (cLen - cPos >= need) return;
+    const rem = cLen - cPos;
+    if (rem > 0) chunk.copy(chunk, 0, cPos, cLen);
+    cBase += cPos; cPos = 0; cLen = rem;
+    const { bytesRead } = await fd.read(chunk, cLen, SCAN_CHUNK - cLen, cBase + cLen);
+    cLen += bytesRead;
+  };
+
+  // Helpers de lecture dans le chunk
+  const u8   = ()  => chunk[cPos++];
+  const u16  = ()  => { const v = chunk.readUInt16LE(cPos); cPos += 2; return v; };
+  const u32  = ()  => { const v = chunk.readUInt32LE(cPos); cPos += 4; return v; };
+  const s8   = ()  => { const l = u8();  const s = chunk.toString('utf8', cPos, cPos+l); cPos += l; return s; };
+  const s16  = ()  => { const l = u16(); const s = chunk.toString('utf8', cPos, cPos+l); cPos += l; return s; };
+  const sk16 = ()  => { cPos += 2 + chunk.readUInt16LE(cPos); }; // skip string16
+
+  // Chargement initial
+  await ensure(SCAN_CHUNK);
 
   // — Magic & header —
-  const magic = buf.toString('ascii', 0, 4); pos = 4;
-  if (magic !== 'HSHB') throw new Error(`${label}: fichier invalide (magic="${magic}")`);
-
-  readU16(); // version
-  const nb_dbs  = readU32();
-  const nb_rows = readU32();
-  const nb_idx  = readU32();
+  const magic = chunk.toString('ascii', 0, 4); cPos = 4;
+  if (magic !== 'HSHB') { await fd.close(); throw new Error(`${label}: magic invalide ("${magic}")`); }
+  u16(); // version
+  const nb_dbs  = u32();
+  const nb_rows = u32();
+  const nb_idx  = u32();
   console.log(`    → ${nb_rows.toLocaleString()} lignes, ${nb_dbs} base(s), ${nb_idx} champs indexés`);
 
   const dbiBase = W.dbs.length;
-  const rowBase = W.binRowCount;
 
   // — DBs —
   for (let i = 0; i < nb_dbs; i++) {
-    const name  = readStr16();
-    const count = readU32();
+    const name  = s16();
+    const count = u32();
     W.dbs.push({ id: `preloaded_${dbiBase+i}`, name, count });
   }
 
-  // Tableaux typés pour ce fichier — position + dbi seulement
+  // Tableaux typés — position + dbi seulement (~26MB total pour 3.75M lignes)
   const positions = new Uint32Array(nb_rows);
   const dbis      = new Uint16Array(nb_rows);
+  const t0        = Date.now();
+  const YIELD     = 100_000;
 
-  // — Rows — on stocke UNIQUEMENT la position et le dbi, pas les strings
-  const t0    = Date.now();
-  const YIELD = 100_000;
   for (let i = 0; i < nb_rows; i++) {
-    positions[i] = pos + 2; // offset du premier champ string (après dbi u16)
-    dbis[i]      = readU16() + dbiBase;
-    for (let f = 0; f < 13; f++) { const l = readU16(); pos += l; }
+    // Worst-case row : 2 + 13*(2+255) = 3343 octets — 4096 est sûr
+    if (cLen - cPos < 4096) await ensure(4096);
+
+    positions[i] = cBase + cPos + 2; // offset fichier absolu du 1er champ string (après dbi u16)
+    dbis[i]      = u16() + dbiBase;
+    for (let f = 0; f < 13; f++) sk16();
+
     W.totalActive++;
     if ((i+1) % YIELD === 0) {
       const spd = Math.round((i+1) / ((Date.now()-t0) / 1000));
@@ -103,8 +125,10 @@ async function loadBinFile(filePath) {
   }
   process.stdout.write('\n');
 
-  // Enregistrer le fichier (chemin seulement, PAS le buffer)
-  W.files.push({ path: filePath, rowBase, rowCount: nb_rows });
+  await fd.close(); // chunk de 4MB libéré ici — index section ignorée
+
+  // Enregistrer le fichier
+  W.files.push({ path: filePath, rowBase: W.binRowCount, rowCount: nb_rows });
 
   // Fusionner dans les tableaux globaux
   const prevCount = W.binRowCount;
@@ -119,21 +143,9 @@ async function loadBinFile(filePath) {
   W.rowBuf = newBuf; W.rowPos = newPos; W.rowDbi = newDbi;
   W.binRowCount = newCount;
 
-  // — Index — ignoré : recherche par scan
-  for (let i = 0; i < nb_idx; i++) {
-    const nl = readU8(); pos += nl;
-    const nb_keys = readU32();
-    for (let k = 0; k < nb_keys; k++) {
-      const kl = buf.readUInt16LE(pos); pos += 2 + kl;
-      const nb_ids = buf.readUInt32LE(pos); pos += 4 + nb_ids * 4;
-    }
-    await tick();
-  }
-
-  // buf sort de scope ici → GC automatique (aucune référence conservée)
   const elapsed = ((Date.now()-t0)/1000).toFixed(1);
   const mem     = Math.round(process.memoryUsage().heapUsed / 1e6);
-  console.log(`    ✓  Index positions en ${elapsed}s  —  heap: ${mem} MB`);
+  console.log(`    ✓  Positions indexées en ${elapsed}s  —  heap: ${mem} MB`);
 }
 
 // ── Lecture d'une seule ligne depuis le fichier (pour detail/preview) ─────────
