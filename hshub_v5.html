@@ -714,6 +714,7 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
     <button class="hicon-btn" onclick="toggleHistory()" title="Historique" id="hist-btn">🕒 Historique</button>
     <button class="hicon-btn" onclick="openStats()" title="Statistiques">📊 Stats</button>
     <button class="hicon-btn" onclick="openTheme()" title="Thème couleur">🎨 Thème</button>
+    <button class="hicon-btn" id="srv-config-btn" onclick="openServerConfig()" title="Configurer le serveur distant" style="position:relative">🌐 Serveur<span id="srv-cfg-dot" style="display:none;position:absolute;top:4px;right:4px;width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green)"></span></button>
     <button class="hicon-btn" id="fs-btn" onclick="toggleFullscreen()" title="Plein écran">⛶ Plein écran</button>
     <div class="chip" id="dbchip" onclick="document.getElementById('fileinput').click()">
       <div class="dot" id="dbdot"></div>
@@ -921,7 +922,60 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
   </div>
 </div>
 
+<!-- SERVER CONFIG MODAL -->
+<div class="modal" id="server-config-modal" onclick="if(event.target===this)closeServerConfig()">
+  <div class="mbox" style="max-width:500px">
+    <div class="mhead">
+      <span>🌐 Serveur distant</span>
+      <button class="mclose" onclick="closeServerConfig()">✕</button>
+    </div>
+    <div class="mbody" style="padding:20px 17px">
+      <p style="font-size:12px;color:var(--t2);margin-bottom:18px;line-height:1.7">
+        Entrez l'URL de votre serveur HsHub (Codespaces, VPS, etc.).<br>
+        Tous les appels <code style="color:var(--a2);background:rgba(0,198,255,0.08);padding:1px 5px;border-radius:3px">/api/*</code> seront redirigés vers ce serveur.
+      </p>
+      <div class="f" style="margin-bottom:18px">
+        <label>URL du serveur data</label>
+        <input id="srv-url-input" placeholder="https://monnom-7331.app.github.dev" autocomplete="off" spellcheck="false" onkeydown="if(event.key==='Enter')saveServerConfig()">
+        <span class="fhint">Ex : https://monnom-7331.app.github.dev &nbsp;|&nbsp; http://localhost:7331</span>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="sbtn" style="font-size:12px;padding:10px 22px;text-transform:none;letter-spacing:.2px" onclick="saveServerConfig()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+          Enregistrer &amp; tester
+        </button>
+        <button class="cbtn" onclick="closeServerConfig()">Annuler</button>
+        <button class="cbtn" style="margin-left:auto;color:var(--red);border-color:rgba(255,77,109,0.2)" onclick="clearServerConfig()">✕ Effacer</button>
+      </div>
+      <div id="srv-config-status" style="margin-top:14px;font-size:11px;color:var(--t3);font-family:'Space Mono',monospace;min-height:16px"></div>
+    </div>
+  </div>
+</div>
+
 <script>
+// ================================================================
+// API FETCH INTERCEPTOR
+// Redirige /api/* vers le serveur distant configuré (localStorage)
+// Fonctionne aussi bien en mode GitHub Pages qu'en mode local.
+// ================================================================
+(function() {
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = function(input, init) {
+    let url = typeof input === 'string' ? input
+            : (input instanceof Request) ? input.url
+            : String(input);
+    if (url.startsWith('/api/') || url === '/api') {
+      const base = (localStorage.getItem('HSHUB_API_URL') || '').replace(/\/$/, '');
+      if (base) {
+        const newUrl = base + url;
+        if (typeof input === 'string') return _origFetch(newUrl, init);
+        return _origFetch(new Request(newUrl, input), init);
+      }
+    }
+    return _origFetch(input, init);
+  };
+})();
+
 // ================================================================
 // GLOBAL ERROR HANDLER — affiche les erreurs JS en toast
 // ================================================================
@@ -3186,6 +3240,77 @@ async function loadBinFileLocal(file) {
 
 // Init — afficher le badge dès le démarrage
 updateCacheBadge();
+
+// ================================================================
+// SERVER CONFIG (URL distante stockée en localStorage)
+// ================================================================
+(function initSrvDot() {
+  const url = localStorage.getItem('HSHUB_API_URL');
+  const dot = document.getElementById('srv-cfg-dot');
+  if (dot) dot.style.display = url ? 'block' : 'none';
+})();
+
+function openServerConfig() {
+  const url = localStorage.getItem('HSHUB_API_URL') || '';
+  document.getElementById('srv-url-input').value = url;
+  const st = document.getElementById('srv-config-status');
+  st.style.color = 'var(--t3)';
+  st.textContent = url ? '✓ Serveur actuel : ' + url : 'Aucun serveur configuré — entrez l\'URL ci-dessus.';
+  document.getElementById('server-config-modal').classList.add('on');
+}
+function closeServerConfig() {
+  document.getElementById('server-config-modal').classList.remove('on');
+}
+async function saveServerConfig() {
+  const raw = document.getElementById('srv-url-input').value.trim().replace(/\/$/, '');
+  const st  = document.getElementById('srv-config-status');
+  if (!raw) { clearServerConfig(); return; }
+  // basic URL check
+  try { new URL(raw); } catch(_) {
+    st.style.color = 'var(--red)';
+    st.textContent = '❌ URL invalide — ex : https://monnom-7331.app.github.dev';
+    return;
+  }
+  localStorage.setItem('HSHUB_API_URL', raw);
+  const dot = document.getElementById('srv-cfg-dot');
+  if (dot) dot.style.display = 'block';
+  st.style.color = 'var(--t3)';
+  st.textContent = '⏳ Test de connexion…';
+  try {
+    const r = await fetch('/api/status');
+    if (r.ok) {
+      const s = await r.json();
+      st.style.color = 'var(--green)';
+      st.textContent = '✅ Connecté ! (' + (s.totalActive||0) + ' bases, ' + (s.totalRows||0).toLocaleString() + ' lignes)';
+      setTimeout(() => { closeServerConfig(); location.reload(); }, 1500);
+    } else {
+      st.style.color = 'var(--gold)';
+      st.textContent = '⚠ Serveur répond HTTP ' + r.status + ' — URL enregistrée quand même.';
+    }
+  } catch(e) {
+    st.style.color = 'var(--red)';
+    st.textContent = '❌ Inaccessible : ' + e.message + ' — URL enregistrée quand même.';
+  }
+}
+function clearServerConfig() {
+  localStorage.removeItem('HSHUB_API_URL');
+  document.getElementById('srv-url-input').value = '';
+  const dot = document.getElementById('srv-cfg-dot');
+  if (dot) dot.style.display = 'none';
+  const st = document.getElementById('srv-config-status');
+  st.style.color = 'var(--t3)';
+  st.textContent = 'Serveur effacé. Rechargement…';
+  setTimeout(() => { closeServerConfig(); location.reload(); }, 900);
+}
+
+// Auto-ouvre la config si on est sur GitHub Pages et aucun serveur configuré
+(function autoPromptConfig() {
+  const isGhPages = location.hostname.endsWith('.github.io') || location.hostname.endsWith('.github.dev');
+  const hasConfig = !!localStorage.getItem('HSHUB_API_URL');
+  if (isGhPages && !hasConfig) {
+    setTimeout(openServerConfig, 1200);
+  }
+})();
 </script>
 </body>
 </html>
