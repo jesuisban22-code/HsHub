@@ -1,1 +1,2 @@
-index.bin filter=lfs diff=lfs merge=lfs -text
+# Normalise les fins de ligne
+* text=auto
