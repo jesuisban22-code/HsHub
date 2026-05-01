@@ -107,7 +107,7 @@ function processRow(dbi,row,mp){
 function guessDelim(line){const c={',':0,';':0,'|':0,'\t':0};for(const ch of line)if(ch in c)c[ch]++;return Object.entries(c).sort((a,b)=>b[1]-a[1])[0][0];}
 async function loadCsvTsv(filePath,dbi,istsv){
   return new Promise((resolve,reject)=>{
-    const stream=fs.createReadStream(filePath,{encoding:'latin1'});
+    const stream=fs.createReadStream(filePath,{encoding:'utf8'});
     const rl=readline.createInterface({input:stream,crlfDelay:Infinity});
     let headers=null,mapping=null,autoDelim=istsv?'\t':null,count=0;
     rl.on('line',line=>{

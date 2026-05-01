@@ -39,9 +39,8 @@ const W = {
 const F = { dbi:0, ln:1, fn:2, bd:3, st:4, sn:5, pc:6, cy:7, co:8, ni:9, em:10, ph:11, ib:12, ip:13 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-const Nn   = s => !s ? '' : String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+/g,' ').trim();
 const _AC  = {'à':'a','á':'a','â':'a','ä':'a','ã':'a','å':'a','æ':'ae','è':'e','é':'e','ê':'e','ë':'e','ì':'i','í':'i','î':'i','ï':'i','ò':'o','ó':'o','ô':'o','ö':'o','õ':'o','ø':'o','ù':'u','ú':'u','û':'u','ü':'u','ý':'y','ÿ':'y','ñ':'n','ç':'c','ß':'ss','œ':'oe'};
-const NnF  = s => !s ? '' : s.toLowerCase().replace(/[àáâäãåæèéêëìíîïòóôöõøùúûüýÿñçßœ]/g, c => _AC[c]||c).replace(/\s+/g,' ').trim();
+const NnF  = s => !s ? '' : String(s).toLowerCase().replace(/[àáâäãåæèéêëìíîïòóôöõøùúûüýÿñçßœ]/g, c => _AC[c]||c).replace(/\s+/g,' ').trim();
 const ND   = s => !s ? '' : String(s).replace(/[-\/.]/g,'');
 const fmtB = n => n >= 1e9 ? (n/1e9).toFixed(1)+'GB' : n >= 1e6 ? (n/1e6).toFixed(0)+'MB' : (n/1e3).toFixed(0)+'KB';
 const fmtN = n => n >= 1e9 ? (n/1e9).toFixed(2)+'B'  : n >= 1e6 ? (n/1e6).toFixed(1)+'M'  : n >= 1e3 ? (n/1e3).toFixed(0)+'K' : String(n);
@@ -557,8 +556,17 @@ app.post('/api/search_by_ids', async (req, res) => {
   if (!W.loaded) return res.status(503).json({ error: 'Index non chargé' });
   const { ids = [] } = req.body;
   try {
-    const bufs = await loadBufs();
-    const rows = ids.slice(0, 200).map(id => rowPreview(id, bufs)).filter(Boolean);
+    const top     = ids.slice(0, 200);
+    const binPart = top.filter(id => id < W.binRowCount);
+    const rowMap  = await rowReadBatch(binPart);
+    const rows = top.map(id => {
+      let p;
+      if (id < W.binRowCount) p = rowMap.get(id);
+      else p = W.prev[id - W.binRowCount] || null;
+      if (!p) return null;
+      const db = W.dbs[p[F.dbi]];
+      return { id, dbName: db ? db.name : '', ln: p[F.ln], fn: p[F.fn], bd: p[F.bd], pc: p[F.pc], cy: p[F.cy] };
+    }).filter(Boolean);
     res.json({ rows });
   } catch(e) {
     res.status(500).json({ error: e.message });
@@ -600,7 +608,7 @@ app.get('/api/fam/:id', async (req, res) => {
     }
     if (!refP) return res.json({ id, results: [] });
 
-    const ln = Nn(refP[F.ln]), pc = refP[F.pc], st = Nn(refP[F.st]);
+    const ln = NnF(refP[F.ln]), pc = refP[F.pc], st = NnF(refP[F.st]);
     const sc    = new Map();
     const total = W.binRowCount + W.prev.length;
     const YIELD = 5_000;
@@ -611,9 +619,9 @@ app.get('/api/fam/:id', async (req, res) => {
       if (rid === id || W.deleted.has(rid)) continue;
       const r = rowGet(rid, bufs); if (!r) continue;
       let pts = 0; const rs = new Set();
-      if (ln && Nn(r[F.ln]) === ln) { pts += 3; rs.add('Même nom'); }
-      if (pc && r[F.pc] === pc)     { pts += 2; rs.add('Même CP'); }
-      if (st && Nn(r[F.st]) === st) { pts += 4; rs.add('Même adresse'); }
+      if (ln && NnF(r[F.ln]) === ln) { pts += 3; rs.add('Même nom'); }
+      if (pc && r[F.pc] === pc)      { pts += 2; rs.add('Même CP'); }
+      if (st && NnF(r[F.st]) === st) { pts += 4; rs.add('Même adresse'); }
       if (pts >= 3) {
         const e = sc.get(rid) || { pts: 0, rs: new Set() };
         e.pts += pts; rs.forEach(x => e.rs.add(x)); sc.set(rid, e);
@@ -698,12 +706,12 @@ function loadCsvFile(filePath) {
       const g  = key => mapping[key] ? String(row[mapping[key]] || '') : '';
       W.prev.push([
         dbiIdx,
-        Nn(g('lastName')), Nn(g('firstName')), ND(g('birthDate')),
-        Nn(g('street')),   Nn(g('streetNum')),
+        NnF(g('lastName')), NnF(g('firstName')), ND(g('birthDate')),
+        NnF(g('street')),   NnF(g('streetNum')),
         String(row[mapping.postal]     ||'').trim(),
-        Nn(g('city')),     Nn(g('country')),
+        NnF(g('city')),     NnF(g('country')),
         String(row[mapping.nationalId] ||'').replace(/[\s\-.]/g,''),
-        Nn(g('email')),
+        NnF(g('email')),
         String(row[mapping.phone]      ||'').replace(/\D/g,''),
         String(row[mapping.iban]       ||'').replace(/\s/g,'').toLowerCase(),
         String(row[mapping.ip]         ||'').trim()
