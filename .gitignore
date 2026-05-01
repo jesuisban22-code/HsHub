@@ -1,3 +1,6 @@
 node_modules/
 *.csv
+*.bin
+*.sqlite
 desktop.ini
+frontend-server.js
