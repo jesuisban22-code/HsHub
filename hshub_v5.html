@@ -330,6 +330,36 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
   border:1px solid rgba(0,229,255,0.2);animation:ringPulse 2.5s ease-out infinite}
 .landing-logo-icon{position:relative}
 @keyframes ringPulse{0%{transform:scale(1);opacity:.6}100%{transform:scale(1.35);opacity:0}}
+
+/* Landing 3D parallax */
+.landing-inner{transform-style:preserve-3d;perspective:800px}
+
+/* YEUX — tracking curseur */
+.eye-pair{display:flex;gap:20px;justify-content:center;margin:8px 0 12px}
+.eye-socket{width:44px;height:30px;background:rgba(0,0,0,0.88);
+  border:1.5px solid rgba(0,229,255,0.45);border-radius:50%;
+  box-shadow:0 0 18px rgba(0,229,255,0.35),inset 0 0 10px rgba(0,0,0,0.9);
+  position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden;
+  animation:eyeBlink 7s ease-in-out infinite}
+.eye-socket:nth-child(2){animation-delay:-2.3s}
+@keyframes eyeBlink{0%,90%,100%{transform:scaleY(1)}93%{transform:scaleY(0.04)}}
+.eye-iris{width:24px;height:24px;border-radius:50%;
+  background:conic-gradient(from 0deg,#003355,#00c6ff,#006688,#00aadd,#003355);
+  box-shadow:0 0 12px rgba(0,198,255,0.7),inset 0 0 5px rgba(0,0,0,0.6);
+  position:relative;display:flex;align-items:center;justify-content:center;
+  animation:irisRotate 10s linear infinite}
+@keyframes irisRotate{from{filter:hue-rotate(0deg)}to{filter:hue-rotate(360deg)}}
+.eye-pupil{width:11px;height:11px;border-radius:50%;
+  background:radial-gradient(circle at 35% 30%,#111,#000);
+  box-shadow:0 0 5px rgba(0,229,255,0.6);
+  position:absolute;will-change:transform;transition:transform 0.06s ease-out}
+.eye-socket::after{content:'';position:absolute;inset:-1px;border-radius:50%;
+  background:linear-gradient(180deg,rgba(0,229,255,0.18) 0%,transparent 55%);pointer-events:none}
+
+/* Typing cursor */
+.typing-cursor{display:inline-block;width:2px;height:1em;background:var(--a2);
+  margin-left:2px;vertical-align:middle;animation:cursorBlink .7s step-end infinite}
+@keyframes cursorBlink{50%{opacity:0}}
 </style>
 </head>
 <body>
@@ -352,7 +382,11 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
     <div>
       <div class="landing-logo-icon">🔍</div>
       <div class="landing-title">Hs<em>Hub</em></div>
-      <div class="landing-subtitle">Moteur de recherche — connectez votre serveur data pour commencer.</div>
+      <div class="eye-pair" id="eye-pair">
+        <div class="eye-socket"><div class="eye-iris"><div class="eye-pupil"></div></div></div>
+        <div class="eye-socket"><div class="eye-iris"><div class="eye-pupil"></div></div></div>
+      </div>
+      <div class="landing-subtitle" id="landing-subtitle">Moteur de recherche haute performance — connectez votre serveur pour commencer.</div>
     </div>
     <div class="landing-stats">
       <div class="lstat"><div class="lstat-val" id="lstat-total">—</div><div class="lstat-lbl">Entrées</div></div>
@@ -602,43 +636,45 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
 
 <script>
 // ================================================================
-// CONFIG — changez DISCORD_URL avec votre lien invite
+// CONFIG
 // ================================================================
-const DISCORD_URL = 'https://discord.gg/VOTRE_LIEN'; // ← remplacez ici
+const DISCORD_URL     = 'https://discord.gg/2WCq9r69d';
+const DEFAULT_SERVER_URL = ''; // ← Mettez l'URL de votre Codespaces/VPS ici
+                               //   Ex: 'https://monnom-7331.app.github.dev'
+                               //   Les nouveaux visiteurs se connecteront automatiquement.
+
+// Auto-connect : pré-remplit le serveur pour les visiteurs sans config
+if (DEFAULT_SERVER_URL && !localStorage.getItem('HSHUB_API_URL')) {
+  localStorage.setItem('HSHUB_API_URL', DEFAULT_SERVER_URL);
+}
 
 // ================================================================
-// INIT VISUEL — starfield + cursor glow (aucune boucle RAF)
+// INIT VISUEL — starfield, yeux, parallax, cursor glow (0 canvas)
 // ================================================================
 (function initVisuals() {
-  // Stars via box-shadow — rendu unique au chargement, zéro boucle
+  // ── Starfield via box-shadow (rendu unique, zéro boucle) ──────
   const el = document.getElementById('bg-stars');
   if (el) {
-    const rng = (min, max) => min + Math.random() * (max - min);
-    let shadows = [];
-    for (let i = 0; i < 180; i++) {
-      const x = rng(0, 100).toFixed(2);
-      const y = rng(0, 100).toFixed(2);
-      const op = rng(0.08, 0.55).toFixed(2);
-      const sz = Math.random() < 0.08 ? '2px 2px' : '1px 1px';
-      shadows.push(`${x}vw ${y}vh 0 0 rgba(255,255,255,${op})`);
+    const rng = (mn, mx) => mn + Math.random() * (mx - mn);
+    const shadows = [];
+    for (let i = 0; i < 220; i++) {
+      shadows.push(`${rng(0,100).toFixed(2)}vw ${rng(0,100).toFixed(2)}vh 0 0 rgba(255,255,255,${rng(0.06,0.5).toFixed(2)})`);
     }
     el.style.boxShadow = shadows.join(',');
-    // Quelques étoiles brillantes CSS (twinkle)
-    const bright = [
-      [12,8,0.7],[28,22,0.6],[55,15,0.75],[73,38,0.65],[88,12,0.8],
-      [8,65,0.6],[44,70,0.7],[66,82,0.65],[91,55,0.7],[35,90,0.6]
-    ];
-    bright.forEach(([x,y,op]) => {
+    // Étoiles twinkling
+    [[12,8,0.75],[28,22,0.6],[55,14,0.8],[74,38,0.65],[89,11,0.85],
+     [7,64,0.6],[44,71,0.7],[66,83,0.65],[91,54,0.7],[35,91,0.6],
+     [50,45,0.55],[20,50,0.7],[80,68,0.65]].forEach(([x,y,op]) => {
       const s = document.createElement('div');
-      s.style.cssText = `position:fixed;left:${x}vw;top:${y}vh;width:2px;height:2px;
-        border-radius:50%;pointer-events:none;z-index:0;
-        background:rgba(255,255,255,${op});
+      s.style.cssText = `position:fixed;left:${x}vw;top:${y}vh;width:2px;height:2px;border-radius:50%;
+        pointer-events:none;z-index:0;background:rgba(255,255,255,${op});
         --op:${op};--d:${(3+Math.random()*4).toFixed(1)}s;--dl:-${(Math.random()*4).toFixed(1)}s;
         animation:twinkle var(--d) ease-in-out infinite var(--dl)`;
       document.body.appendChild(s);
     });
   }
-  // Cursor glow — léger suivi de souris
+
+  // ── Cursor glow ───────────────────────────────────────────────
   const glow = document.getElementById('cursor-glow');
   if (glow) {
     glow.style.display = 'block';
@@ -647,9 +683,69 @@ const DISCORD_URL = 'https://discord.gg/VOTRE_LIEN'; // ← remplacez ici
       glow.style.top  = e.clientY + 'px';
     }, { passive: true });
   }
-  // Discord links
-  const links = document.querySelectorAll('#discord-link,#discord-landing');
-  links.forEach(l => { if (DISCORD_URL && DISCORD_URL !== 'https://discord.gg/VOTRE_LIEN') l.href = DISCORD_URL; });
+
+  // ── Yeux — tracking curseur ───────────────────────────────────
+  document.addEventListener('mousemove', e => {
+    document.querySelectorAll('.eye-pupil').forEach(pupil => {
+      const sock = pupil.closest('.eye-socket');
+      if (!sock) return;
+      const r  = sock.getBoundingClientRect();
+      const cx = r.left + r.width  / 2;
+      const cy = r.top  + r.height / 2;
+      const angle = Math.atan2(e.clientY - cy, e.clientX - cx);
+      const dist  = Math.min(5, Math.hypot(e.clientX - cx, e.clientY - cy) * 0.05);
+      pupil.style.transform = `translate(${Math.cos(angle)*dist}px,${Math.sin(angle)*dist}px)`;
+    });
+  }, { passive: true });
+
+  // ── Parallax 3D sur le landing ────────────────────────────────
+  const lInner = document.querySelector('.landing-inner');
+  if (lInner) {
+    document.addEventListener('mousemove', e => {
+      const cx = window.innerWidth  / 2;
+      const cy = window.innerHeight / 2;
+      const dx = (e.clientX - cx) / cx;
+      const dy = (e.clientY - cy) / cy;
+      lInner.style.transform = `perspective(700px) rotateX(${(-dy*3.5).toFixed(2)}deg) rotateY(${(dx*3.5).toFixed(2)}deg)`;
+    }, { passive: true });
+    document.addEventListener('mouseleave', () => { lInner.style.transform = ''; });
+  }
+
+  // ── Nébuleuses — micro-parallax sur scroll/mouse ──────────────
+  const nbs = document.querySelectorAll('.bg-nb');
+  document.addEventListener('mousemove', e => {
+    const dx = (e.clientX / window.innerWidth  - 0.5) * 2;
+    const dy = (e.clientY / window.innerHeight - 0.5) * 2;
+    nbs.forEach((nb, i) => {
+      const f = (i % 2 === 0 ? 1 : -1) * (0.006 + i * 0.003);
+      nb.style.transform = `translate(${dx * 40 * f}px,${dy * 30 * f}px)`;
+    });
+  }, { passive: true });
+
+  // ── Typing animation sur le sous-titre de la landing ─────────
+  const sub = document.getElementById('landing-subtitle');
+  if (sub) {
+    const txt = sub.textContent.trim();
+    sub.textContent = '';
+    const cursor = document.createElement('span');
+    cursor.className = 'typing-cursor';
+    sub.appendChild(cursor);
+    let i = 0;
+    const type = () => {
+      if (i < txt.length) {
+        sub.insertBefore(document.createTextNode(txt[i++]), cursor);
+        setTimeout(type, 24 + Math.random() * 18);
+      } else {
+        setTimeout(() => cursor.remove(), 1800);
+      }
+    };
+    setTimeout(type, 900);
+  }
+
+  // ── Discord links ─────────────────────────────────────────────
+  document.querySelectorAll('#discord-link,#discord-landing').forEach(l => {
+    l.href = DISCORD_URL;
+  });
 })();
 
 // ================================================================
@@ -757,9 +853,13 @@ document.addEventListener('DOMContentLoaded', async function() {
     }, 2000);
   } else {
     updateSrvBadge();
-    // Auto-open config if no server configured
-    if (!localStorage.getItem('HSHUB_API_URL')) {
+    const hasUrl = localStorage.getItem('HSHUB_API_URL');
+    if (!hasUrl) {
+      // Aucune URL du tout → ouvrir la config (admin seulement)
       setTimeout(openServerConfig, 800);
+    } else if (hasUrl === DEFAULT_SERVER_URL && DEFAULT_SERVER_URL) {
+      // Serveur par défaut hors ligne → message discret, pas de modal
+      toast('⏳ Serveur hors ligne — réessayez dans quelques instants', '');
     } else {
       toast('⚠ Serveur inaccessible — vérifiez l\'URL ou relancez Codespaces', 'red');
     }
