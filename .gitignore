@@ -4,3 +4,4 @@ node_modules/
 *.sqlite
 desktop.ini
 frontend-server.js
+start.bat
