@@ -283,9 +283,68 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
 @keyframes fadeIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:translateY(0)}}
 @keyframes searchPulse{0%{box-shadow:0 0 0 0 rgba(0,198,255,.4)}70%{box-shadow:0 0 0 8px rgba(0,198,255,0)}100%{box-shadow:0 0 0 0 rgba(0,198,255,0)}}
 .sbtn.searching{animation:searchPulse 1s ease infinite}
+
+/* ── ANIMATED BACKGROUND ─────────────────────────────────────────── */
+/* Nébuleuses flottantes — CSS pur, GPU, 0 canvas */
+.bg-nebula{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+.bg-nb{position:absolute;border-radius:50%;filter:blur(90px);will-change:transform;
+  animation:nbFloat var(--dur,24s) ease-in-out infinite alternate var(--dly,0s)}
+@keyframes nbFloat{0%{transform:translate(0,0) scale(1)}100%{transform:translate(var(--tx,30px),var(--ty,20px)) scale(var(--sc,1.1))}}
+
+/* Étoiles — rendu CSS box-shadow, aucune boucle JS */
+#bg-stars{position:fixed;inset:0;z-index:0;pointer-events:none;
+  width:2px;height:2px;background:transparent;border-radius:50%}
+@keyframes twinkle{0%,100%{opacity:var(--op,.5)}50%{opacity:calc(var(--op,.5)*.2)}}
+
+/* Cursor glow suivant la souris */
+#cursor-glow{position:fixed;width:300px;height:300px;border-radius:50%;pointer-events:none;
+  background:radial-gradient(circle,rgba(0,198,255,0.06) 0%,transparent 70%);
+  transform:translate(-50%,-50%);z-index:1;transition:left .12s,top .12s;display:none}
+
+/* Discord */
+.discord-btn{background:rgba(88,101,242,0.1);border:1px solid rgba(88,101,242,0.32);
+  color:#8b9cff;padding:6px 11px;border-radius:var(--rsm);font-size:11.5px;cursor:pointer;
+  transition:all .2s;display:flex;align-items:center;gap:6px;text-decoration:none;
+  white-space:nowrap;font-weight:600}
+.discord-btn:hover{background:rgba(88,101,242,0.2);border-color:rgba(88,101,242,0.55);
+  color:#fff;box-shadow:0 0 14px rgba(88,101,242,0.35)}
+.discord-btn svg{flex-shrink:0}
+.lbtn-discord{background:rgba(88,101,242,0.1);color:#8b9cff;
+  border:1px solid rgba(88,101,242,0.38);padding:14px 24px;border-radius:10px;
+  font-size:14px;font-family:'Syne',sans-serif;font-weight:700;cursor:pointer;
+  transition:all .3s;letter-spacing:.5px;text-transform:uppercase;
+  text-decoration:none;display:inline-flex;align-items:center;gap:9px}
+.lbtn-discord:hover{transform:translateY(-3px);background:rgba(88,101,242,0.2);
+  box-shadow:0 8px 32px rgba(88,101,242,0.3);color:#fff}
+
+/* Landing title animated gradient */
+.landing-title em{
+  background:linear-gradient(90deg,#00e5ff,#7dd3fc,#b57bee,#00e5ff);
+  background-size:300% 100%;
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
+  animation:gradShift 4s linear infinite}
+@keyframes gradShift{0%{background-position:0%}100%{background-position:300%}}
+
+/* Logo landing pulse ring */
+.landing-logo-icon::after{content:'';position:absolute;inset:-8px;border-radius:24px;
+  border:1px solid rgba(0,229,255,0.2);animation:ringPulse 2.5s ease-out infinite}
+.landing-logo-icon{position:relative}
+@keyframes ringPulse{0%{transform:scale(1);opacity:.6}100%{transform:scale(1.35);opacity:0}}
 </style>
 </head>
 <body>
+
+<!-- NEBULA BLOBS (CSS animation, 0 canvas) -->
+<div class="bg-nebula" aria-hidden="true">
+  <div class="bg-nb" style="width:650px;height:650px;background:rgba(0,120,220,0.09);left:-160px;top:-160px;--dur:28s;--tx:50px;--ty:40px;--sc:1.12"></div>
+  <div class="bg-nb" style="width:550px;height:550px;background:rgba(159,93,226,0.08);right:-120px;bottom:5%;--dur:34s;--dly:-10s;--tx:-40px;--ty:-50px;--sc:1.18"></div>
+  <div class="bg-nb" style="width:420px;height:420px;background:rgba(0,229,255,0.05);left:38%;top:25%;--dur:22s;--dly:-6s;--tx:60px;--ty:-35px;--sc:0.88"></div>
+  <div class="bg-nb" style="width:380px;height:380px;background:rgba(120,80,255,0.06);right:18%;top:55%;--dur:30s;--dly:-18s;--tx:-45px;--ty:25px;--sc:1.22"></div>
+</div>
+<!-- STARS LAYER (box-shadow, aucune boucle) -->
+<div id="bg-stars" aria-hidden="true"></div>
+<!-- CURSOR GLOW -->
+<div id="cursor-glow" aria-hidden="true"></div>
 
 <!-- LANDING -->
 <div id="landing">
@@ -303,6 +362,10 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
     <div class="landing-btns">
       <button class="lbtn-main" onclick="enterApp()">🔍 Lancer une recherche</button>
       <button class="lbtn-srv" onclick="openServerConfig()">🌐 Configurer serveur</button>
+      <a class="lbtn-discord" id="discord-landing" href="#" target="_blank" rel="noopener">
+        <svg width="18" height="14" viewBox="0 0 20 15" fill="currentColor"><path d="M16.93 1.33A16.46 16.46 0 0 0 12.93 0c-.18.32-.39.76-.53 1.1a15.28 15.28 0 0 0-4.8 0A11.6 11.6 0 0 0 7.07 0 16.4 16.4 0 0 0 3.06 1.34C.44 5.28-.27 9.12.09 12.9a16.57 16.57 0 0 0 5.07 2.57c.41-.56.77-1.15 1.08-1.77a10.7 10.7 0 0 1-1.7-.82l.42-.33a11.8 11.8 0 0 0 10.07 0l.42.33c-.54.32-1.1.6-1.7.82.31.62.67 1.21 1.08 1.77A16.52 16.52 0 0 0 19.9 12.9c.42-4.37-.72-8.16-3.0-11.57ZM6.68 10.57c-1.04 0-1.9-.96-1.9-2.14s.84-2.14 1.9-2.14 1.91.96 1.9 2.14-.84 2.14-1.9 2.14Zm6.64 0c-1.04 0-1.9-.96-1.9-2.14s.84-2.14 1.9-2.14 1.9.96 1.9 2.14-.84 2.14-1.9 2.14Z"/></svg>
+        Discord
+      </a>
     </div>
   </div>
 </div>
@@ -345,6 +408,10 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
     <button class="hicon-btn" onclick="openTheme()">🎨 Thème</button>
     <button class="hicon-btn" id="srv-config-btn" onclick="openServerConfig()" style="position:relative">🌐 Serveur<span id="srv-cfg-dot" style="display:none;position:absolute;top:4px;right:4px;width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green)"></span></button>
     <button class="hicon-btn" id="fs-btn" onclick="toggleFullscreen()">⛶ Plein écran</button>
+    <a class="discord-btn" id="discord-link" href="#" target="_blank" rel="noopener" title="Discord HsHub">
+      <svg width="14" height="11" viewBox="0 0 20 15" fill="currentColor"><path d="M16.93 1.33A16.46 16.46 0 0 0 12.93 0c-.18.32-.39.76-.53 1.1a15.28 15.28 0 0 0-4.8 0A11.6 11.6 0 0 0 7.07 0 16.4 16.4 0 0 0 3.06 1.34C.44 5.28-.27 9.12.09 12.9a16.57 16.57 0 0 0 5.07 2.57c.41-.56.77-1.15 1.08-1.77a10.7 10.7 0 0 1-1.7-.82l.42-.33a11.8 11.8 0 0 0 10.07 0l.42.33c-.54.32-1.1.6-1.7.82.31.62.67 1.21 1.08 1.77A16.52 16.52 0 0 0 19.9 12.9c.42-4.37-.72-8.16-3.0-11.57ZM6.68 10.57c-1.04 0-1.9-.96-1.9-2.14s.84-2.14 1.9-2.14 1.91.96 1.9 2.14-.84 2.14-1.9 2.14Zm6.64 0c-1.04 0-1.9-.96-1.9-2.14s.84-2.14 1.9-2.14 1.9.96 1.9 2.14-.84 2.14-1.9 2.14Z"/></svg>
+      Discord
+    </a>
     <div class="chip" id="dbchip">
       <div class="dot" id="dbdot"></div>
       <span id="chiplabel">En attente</span>
@@ -534,6 +601,57 @@ header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;ba
 </div>
 
 <script>
+// ================================================================
+// CONFIG — changez DISCORD_URL avec votre lien invite
+// ================================================================
+const DISCORD_URL = 'https://discord.gg/VOTRE_LIEN'; // ← remplacez ici
+
+// ================================================================
+// INIT VISUEL — starfield + cursor glow (aucune boucle RAF)
+// ================================================================
+(function initVisuals() {
+  // Stars via box-shadow — rendu unique au chargement, zéro boucle
+  const el = document.getElementById('bg-stars');
+  if (el) {
+    const rng = (min, max) => min + Math.random() * (max - min);
+    let shadows = [];
+    for (let i = 0; i < 180; i++) {
+      const x = rng(0, 100).toFixed(2);
+      const y = rng(0, 100).toFixed(2);
+      const op = rng(0.08, 0.55).toFixed(2);
+      const sz = Math.random() < 0.08 ? '2px 2px' : '1px 1px';
+      shadows.push(`${x}vw ${y}vh 0 0 rgba(255,255,255,${op})`);
+    }
+    el.style.boxShadow = shadows.join(',');
+    // Quelques étoiles brillantes CSS (twinkle)
+    const bright = [
+      [12,8,0.7],[28,22,0.6],[55,15,0.75],[73,38,0.65],[88,12,0.8],
+      [8,65,0.6],[44,70,0.7],[66,82,0.65],[91,55,0.7],[35,90,0.6]
+    ];
+    bright.forEach(([x,y,op]) => {
+      const s = document.createElement('div');
+      s.style.cssText = `position:fixed;left:${x}vw;top:${y}vh;width:2px;height:2px;
+        border-radius:50%;pointer-events:none;z-index:0;
+        background:rgba(255,255,255,${op});
+        --op:${op};--d:${(3+Math.random()*4).toFixed(1)}s;--dl:-${(Math.random()*4).toFixed(1)}s;
+        animation:twinkle var(--d) ease-in-out infinite var(--dl)`;
+      document.body.appendChild(s);
+    });
+  }
+  // Cursor glow — léger suivi de souris
+  const glow = document.getElementById('cursor-glow');
+  if (glow) {
+    glow.style.display = 'block';
+    document.addEventListener('mousemove', e => {
+      glow.style.left = e.clientX + 'px';
+      glow.style.top  = e.clientY + 'px';
+    }, { passive: true });
+  }
+  // Discord links
+  const links = document.querySelectorAll('#discord-link,#discord-landing');
+  links.forEach(l => { if (DISCORD_URL && DISCORD_URL !== 'https://discord.gg/VOTRE_LIEN') l.href = DISCORD_URL; });
+})();
+
 // ================================================================
 // FETCH INTERCEPTOR — redirige /api/* vers le serveur distant
 // ================================================================
